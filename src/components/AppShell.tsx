@@ -1,6 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { CalendarDays, ChefHat, Home, ListTodo, Settings, ShoppingBasket } from "lucide-react";
 import type { ReactNode } from "react";
+import { BrandLogo } from "@/components/BrandLogo";
 import { QuickAdd } from "@/components/QuickAdd";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -45,9 +46,7 @@ export function AppShell({
 
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r border-border bg-card px-4 py-6 lg:flex">
         <Link to="/" className="flex items-center gap-3 rounded-xl px-2">
-          <span className="grid h-10 w-10 place-items-center rounded-2xl bg-primary text-sm font-extrabold text-primary-foreground">
-            M
-          </span>
+          <BrandLogo className="h-11 w-11" priority />
           <span>
             <span className="block font-display text-lg font-bold tracking-tight">Mesa</span>
             <span className="block text-xs text-muted-foreground">Family life, together.</span>
@@ -108,9 +107,7 @@ export function AppShell({
           <div className="mx-auto flex max-w-6xl items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="mb-3 flex items-center gap-2 lg:hidden">
-                <span className="grid h-8 w-8 place-items-center rounded-xl bg-primary text-xs font-extrabold text-primary-foreground">
-                  M
-                </span>
+                <BrandLogo className="h-9 w-9" priority />
                 <span className="font-display text-sm font-bold">Mesa</span>
               </div>
               <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{title}</h1>

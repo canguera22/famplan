@@ -1,6 +1,7 @@
 import { FormEvent, useState, type ReactNode } from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { ArrowRight, Check, LoaderCircle, Mail, ShieldCheck, Users } from "lucide-react";
+import { BrandLogo } from "@/components/BrandLogo";
 import { Button, Card, Field, TextInput } from "@/components/ui-kit";
 import { useAuth } from "@/lib/auth";
 
@@ -18,9 +19,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
 function Brand() {
   return (
     <div className="flex items-center gap-3">
-      <span className="grid h-11 w-11 place-items-center rounded-2xl bg-primary text-sm font-extrabold text-primary-foreground shadow-lg shadow-primary/15">
-        M
-      </span>
+      <BrandLogo
+        className="h-12 w-12 rounded-2xl bg-white/95 p-1 shadow-lg shadow-black/10"
+        priority
+      />
       <span>
         <span className="block font-display text-xl font-bold tracking-tight">Mesa</span>
         <span className="block text-xs text-muted-foreground">Family life, together.</span>
@@ -33,8 +35,9 @@ function LoadingScreen() {
   return (
     <main className="grid min-h-dvh place-items-center bg-background px-5">
       <div className="text-center" role="status">
-        <span className="mx-auto grid h-14 w-14 place-items-center rounded-3xl bg-primary text-primary-foreground">
-          <LoaderCircle className="h-6 w-6 animate-spin" />
+        <span className="relative mx-auto grid h-16 w-16 place-items-center">
+          <BrandLogo className="h-16 w-16" priority />
+          <LoaderCircle className="absolute -bottom-1 -right-1 h-6 w-6 animate-spin rounded-full bg-background p-1 text-primary shadow-sm" />
         </span>
         <p className="mt-4 text-sm font-semibold">Opening your family space…</p>
       </div>
@@ -159,7 +162,7 @@ function SignInScreen() {
 }
 
 function FamilySetupScreen() {
-  const { createFamily, profile, user } = useAuth();
+  const { createFamily, profile, user, error: accountError } = useAuth();
   const firstName = profile?.display_name?.split(" ")[0] || user?.email?.split("@")[0] || "there";
   const [name, setName] = useState("Our family");
   const [submitting, setSubmitting] = useState(false);
@@ -190,6 +193,14 @@ function FamilySetupScreen() {
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
             Name your shared space. Mesa will create your starter task boards automatically.
           </p>
+          {accountError ? (
+            <p
+              className="mt-5 rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              role="alert"
+            >
+              We couldn’t complete your family invitation: {accountError}
+            </p>
+          ) : null}
           <form className="mt-7 space-y-5" onSubmit={submit}>
             <Field label="Family space name" hint="You can change this later.">
               <TextInput

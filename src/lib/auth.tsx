@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { Database } from "@/lib/supabase/database.types";
+import { clearPendingInvitation, readPendingInvitation } from "@/lib/invitation-session";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { getPublicSiteUrl } from "@/lib/site-url";
 
@@ -34,6 +35,37 @@ interface AuthValue {
 }
 
 const AuthContext = createContext<AuthValue | null>(null);
+let pendingInvitationAcceptance: Promise<string | null> | null = null;
+
+async function acceptRememberedInvitation(): Promise<string | null> {
+  if (typeof window === "undefined" || window.location.pathname === "/join") return null;
+  const token = readPendingInvitation();
+  if (!token) return null;
+
+  if (!pendingInvitationAcceptance) {
+    pendingInvitationAcceptance = (async () => {
+      const { error } = await getSupabaseBrowserClient().rpc("accept_family_invitation", {
+        invitation_token: token,
+      });
+      if (!error) {
+        clearPendingInvitation();
+        return null;
+      }
+
+      // A server response means this token cannot be completed silently. Clear it so
+      // the account does not retry forever, then surface the reason before family setup.
+      if (!/failed to fetch|network/i.test(error.message)) clearPendingInvitation();
+      return error.message;
+    })();
+  }
+
+  const activeAttempt = pendingInvitationAcceptance;
+  try {
+    return await activeAttempt;
+  } finally {
+    if (pendingInvitationAcceptance === activeAttempt) pendingInvitationAcceptance = null;
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -54,6 +86,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const supabase = getSupabaseBrowserClient();
+    const invitationError = await acceptRememberedInvitation();
+    if (invitationError) setError(invitationError);
+
     const [profileResult, membershipResult] = await Promise.all([
       supabase.from("profiles").select("*").eq("id", nextSession.user.id).maybeSingle(),
       supabase

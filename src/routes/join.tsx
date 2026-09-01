@@ -1,8 +1,10 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { FormEvent, useState } from "react";
 import { ArrowRight, CheckCircle2, LoaderCircle, Mail, ShieldCheck, Users } from "lucide-react";
+import { BrandLogo } from "@/components/BrandLogo";
 import { Button, Card, Field, TextInput } from "@/components/ui-kit";
 import { useAuth } from "@/lib/auth";
+import { clearPendingInvitation, rememberPendingInvitation } from "@/lib/invitation-session";
 import { publicSiteLink } from "@/lib/site-url";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
@@ -36,6 +38,7 @@ function JoinFamilyPage() {
     setSubmitting(true);
     setError(null);
     try {
+      rememberPendingInvitation(token);
       const redirectTo = publicSiteLink(`/join?token=${encodeURIComponent(token)}`);
       await sendMagicLink(email, redirectTo);
       setSent(true);
@@ -55,6 +58,7 @@ function JoinFamilyPage() {
         { invitation_token: token },
       );
       if (acceptError) throw acceptError;
+      clearPendingInvitation();
       await refreshWorkspace();
       await navigate({ to: "/" });
     } catch (caught) {
@@ -68,9 +72,7 @@ function JoinFamilyPage() {
     <main className="grid min-h-dvh place-items-center bg-background px-5 py-10">
       <div className="w-full max-w-lg">
         <Link to="/" className="flex w-fit items-center gap-3">
-          <span className="grid h-11 w-11 place-items-center rounded-2xl bg-primary text-sm font-extrabold text-primary-foreground">
-            M
-          </span>
+          <BrandLogo className="h-12 w-12" priority />
           <span>
             <span className="block font-display text-xl font-bold tracking-tight">Mesa</span>
             <span className="block text-xs text-muted-foreground">Family life, together.</span>
