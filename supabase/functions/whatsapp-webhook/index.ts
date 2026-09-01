@@ -1,10 +1,17 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  createOpenAIResponse,
+  responseText,
+  safetyIdentifier,
+  type OpenAIResponseItem,
+} from "../_shared/openai.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const TWILIO_AUTH_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_WEBHOOK_URL = Deno.env.get("TWILIO_WEBHOOK_URL") ?? "";
 const TIME_ZONE = "Europe/Madrid";
+const OPENAI_MODEL = "gpt-5.6-terra";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -72,9 +79,17 @@ function addDays(dateKey: string, amount: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-function zonedDateAt(dateKey: string, hour: number): string {
+function validDateKey(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+}
+
+function validClock(value: string | null): boolean {
+  return value === null || /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+function zonedDateAt(dateKey: string, hour: number, minute = 0): string {
   const [year, month, day] = dateKey.split("-").map(Number);
-  const desired = Date.UTC(year!, month! - 1, day!, hour);
+  const desired = Date.UTC(year!, month! - 1, day!, hour, minute);
   let guess = desired;
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: TIME_ZONE,
@@ -334,6 +349,407 @@ async function completeTask(identity: Record<string, string>, query: string): Pr
   return `Done — “${matches[0].title}”.`;
 }
 
+async function creatorId(identity: Record<string, string>): Promise<string | null> {
+  const [{ data: person }, { data: family }] = await Promise.all([
+    supabase.from("people").select("user_id").eq("id", identity.person_id).single(),
+    supabase.from("families").select("created_by").eq("id", identity.family_id).single(),
+  ]);
+  return person?.user_id ?? family?.created_by ?? null;
+}
+
+async function personIdFor(
+  identity: Record<string, string>,
+  requested: string | null,
+): Promise<string | null> {
+  if (!requested) return null;
+  if (/^(me|myself)$/i.test(requested.trim())) return identity.person_id;
+  const { data: people } = await supabase
+    .from("people")
+    .select("id, display_name")
+    .eq("family_id", identity.family_id)
+    .eq("active", true);
+  const lowered = requested.trim().toLowerCase();
+  return (
+    people?.find((person) => person.display_name.toLowerCase() === lowered)?.id ??
+    people?.find((person) => person.display_name.toLowerCase().includes(lowered))?.id ??
+    null
+  );
+}
+
+async function agendaSummary(
+  identity: Record<string, string>,
+  range: "today" | "tomorrow" | "week",
+): Promise<string> {
+  const today = madridDateKey(new Date());
+  const startKey = range === "tomorrow" ? addDays(today, 1) : today;
+  const days = range === "week" ? 7 : 1;
+  const start = zonedDateAt(startKey, 0);
+  const end = zonedDateAt(addDays(startKey, days), 0);
+  const [eventsResult, tasksResult] = await Promise.all([
+    supabase
+      .from("calendar_events")
+      .select("title, starts_at, all_day, assignee_id")
+      .eq("family_id", identity.family_id)
+      .gte("starts_at", start)
+      .lt("starts_at", end)
+      .order("starts_at")
+      .limit(30),
+    supabase
+      .from("list_cards")
+      .select("title, due_at, assignee_id")
+      .eq("family_id", identity.family_id)
+      .neq("status", "done")
+      .not("due_at", "is", null)
+      .gte("due_at", start)
+      .lt("due_at", end)
+      .order("due_at")
+      .limit(30),
+  ]);
+  const events = eventsResult.data ?? [];
+  const tasks = tasksResult.data ?? [];
+  if (!events.length && !tasks.length)
+    return `${range === "week" ? "The next seven days are" : range === "tomorrow" ? "Tomorrow is" : "Today is"} clear.`;
+  const lines = [
+    `${range === "week" ? "Next seven days" : range[0]!.toUpperCase() + range.slice(1)} in Mesa:`,
+  ];
+  for (const event of events) {
+    const day = madridDateKey(event.starts_at);
+    lines.push(
+      `• ${range === "week" ? `${day} · ` : ""}${event.all_day ? "All day" : madridTime(event.starts_at)} — ${event.title}`,
+    );
+  }
+  for (const task of tasks) {
+    const day = madridDateKey(task.due_at!);
+    lines.push(`• ${range === "week" ? `${day} · ` : ""}Task — ${task.title}`);
+  }
+  return lines.join("\n");
+}
+
+async function taskList(
+  identity: Record<string, string>,
+  scope: "mine" | "open" | "all",
+  listName: "family_tasks" | "things_to_buy" | null,
+): Promise<string> {
+  const { data: lists } = await supabase
+    .from("lists")
+    .select("id, name")
+    .eq("family_id", identity.family_id)
+    .is("archived_at", null)
+    .order("position");
+  const wanted =
+    listName === "things_to_buy"
+      ? lists?.find((list) => list.name.toLowerCase() === "things to buy")
+      : listName === "family_tasks"
+        ? lists?.find((list) => list.name.toLowerCase() !== "things to buy")
+        : null;
+  let query = supabase
+    .from("list_cards")
+    .select("title, status, due_at, assignee_id, list_id")
+    .eq("family_id", identity.family_id)
+    .order("due_at", { ascending: true, nullsFirst: false })
+    .limit(30);
+  if (scope !== "all") query = query.neq("status", "done");
+  if (scope === "mine") query = query.eq("assignee_id", identity.person_id);
+  if (wanted) query = query.eq("list_id", wanted.id);
+  const { data: tasks, error } = await query;
+  if (error) return "I couldn’t read the family lists just now.";
+  if (!tasks?.length) return "That list is clear.";
+  const listMap = new Map((lists ?? []).map((list) => [list.id, list.name]));
+  return tasks
+    .map((task, index) => {
+      const due = task.due_at ? ` · due ${madridDateKey(task.due_at)}` : "";
+      return `${index + 1}. ${task.title} · ${task.status} · ${listMap.get(task.list_id) ?? "List"}${due}`;
+    })
+    .join("\n");
+}
+
+async function createTaskFromTool(
+  identity: Record<string, string>,
+  args: {
+    title: string;
+    dueDate: string | null;
+    assigneeName: string | null;
+    listName: "family_tasks" | "things_to_buy";
+  },
+): Promise<string> {
+  const title = args.title.trim();
+  if (!title) return "A task title is required.";
+  if (title.length > 200) return "That task title is too long.";
+  if (args.dueDate && !validDateKey(args.dueDate)) return "I need a valid task date.";
+  const { data: lists } = await supabase
+    .from("lists")
+    .select("id, name")
+    .eq("family_id", identity.family_id)
+    .is("archived_at", null)
+    .order("position");
+  const list =
+    args.listName === "things_to_buy"
+      ? lists?.find((item) => item.name.toLowerCase() === "things to buy")
+      : lists?.find((item) => item.name.toLowerCase() !== "things to buy");
+  if (!list) return "Mesa could not find that family list.";
+  const assigneeId = await personIdFor(identity, args.assigneeName);
+  if (args.assigneeName && !assigneeId)
+    return `I couldn’t find a family member named “${args.assigneeName}”.`;
+  const createdBy = await creatorId(identity);
+  if (!createdBy) return "Mesa could not identify who is creating that task.";
+  const dueAt = args.dueDate ? zonedDateAt(args.dueDate, 9) : null;
+  const { error } = await supabase.from("list_cards").insert({
+    family_id: identity.family_id,
+    list_id: list.id,
+    title,
+    status: assigneeId ? "assigned" : "open",
+    assignee_id: assigneeId,
+    due_at: dueAt,
+    all_day: true,
+    show_on_calendar: Boolean(dueAt),
+    created_by: createdBy,
+  });
+  if (error) {
+    console.error("AI task insert failed", error);
+    return "Mesa could not add that task.";
+  }
+  return `Added “${title}” to ${list.name}${assigneeId ? ` and assigned it to ${args.assigneeName}` : ""}${args.dueDate ? ` for ${args.dueDate}` : ""}.`;
+}
+
+async function assignTask(
+  identity: Record<string, string>,
+  queryText: string,
+  assigneeName: string,
+): Promise<string> {
+  const assigneeId = await personIdFor(identity, assigneeName);
+  if (!assigneeId) return `I couldn’t find a family member named “${assigneeName}”.`;
+  const { data: matches } = await supabase
+    .from("list_cards")
+    .select("id, title")
+    .eq("family_id", identity.family_id)
+    .neq("status", "done")
+    .ilike("title", `%${queryText.replaceAll("%", "")}%`)
+    .limit(3);
+  if (!matches?.length) return `I couldn’t find an open task matching “${queryText}”.`;
+  if (matches.length > 1)
+    return `I found several matches: ${matches.map((task) => task.title).join(", ")}.`;
+  const { error } = await supabase
+    .from("list_cards")
+    .update({ status: "assigned", assignee_id: assigneeId })
+    .eq("id", matches[0].id);
+  return error
+    ? "Mesa could not assign that task."
+    : `Assigned “${matches[0].title}” to ${assigneeName}.`;
+}
+
+async function createEvent(
+  identity: Record<string, string>,
+  args: {
+    title: string;
+    date: string;
+    startTime: string | null;
+    endTime: string | null;
+    assigneeName: string | null;
+  },
+): Promise<string> {
+  if (!args.title.trim()) return "An event title is required.";
+  if (args.title.trim().length > 200) return "That event title is too long.";
+  if (!validDateKey(args.date)) return "I need a valid event date.";
+  if (!validClock(args.startTime) || !validClock(args.endTime))
+    return "Use a valid 24-hour event time.";
+  if (!args.startTime && args.endTime) return "An end time needs a start time too.";
+  const createdBy = await creatorId(identity);
+  if (!createdBy) return "Mesa could not identify who is creating that event.";
+  const assigneeId = await personIdFor(identity, args.assigneeName);
+  if (args.assigneeName && !assigneeId)
+    return `I couldn’t find a family member named “${args.assigneeName}”.`;
+  const timeParts = (args.startTime ?? "00:00").split(":").map(Number);
+  const endParts = args.endTime?.split(":").map(Number);
+  const startsAt = zonedDateAt(args.date, timeParts[0] ?? 0, timeParts[1] ?? 0);
+  let endsAt: string;
+  if (!args.startTime) endsAt = zonedDateAt(addDays(args.date, 1), 0);
+  else if (endParts) endsAt = zonedDateAt(args.date, endParts[0] ?? 0, endParts[1] ?? 0);
+  else endsAt = new Date(new Date(startsAt).getTime() + 60 * 60 * 1000).toISOString();
+  if (new Date(endsAt) <= new Date(startsAt))
+    return "The event end time must be after its start time.";
+  const { error } = await supabase.from("calendar_events").insert({
+    family_id: identity.family_id,
+    title: args.title.trim(),
+    starts_at: startsAt,
+    ends_at: endsAt,
+    all_day: !args.startTime,
+    assignee_id: assigneeId,
+    source_type: "manual",
+    created_by: createdBy,
+  });
+  if (error) {
+    console.error("AI calendar event insert failed", error);
+    return "Mesa could not add that calendar event.";
+  }
+  return `Added “${args.title.trim()}” to the family calendar on ${args.date}${args.startTime ? ` at ${args.startTime}` : ""}.`;
+}
+
+const whatsappTools = [
+  {
+    type: "function",
+    name: "get_agenda",
+    description:
+      "Read family calendar events and due tasks for today, tomorrow, or the next seven days.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { range: { type: "string", enum: ["today", "tomorrow", "week"] } },
+      required: ["range"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "list_tasks",
+    description:
+      "List Mesa tasks or shopping items. Use mine for tasks assigned to this WhatsApp user.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        scope: { type: "string", enum: ["mine", "open", "all"] },
+        listName: { type: ["string", "null"], enum: ["family_tasks", "things_to_buy", null] },
+      },
+      required: ["scope", "listName"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "create_task",
+    description:
+      "Create a family task or a Things to buy item. Shopping requests always use things_to_buy.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        dueDate: { type: ["string", "null"], description: "YYYY-MM-DD, or null" },
+        assigneeName: {
+          type: ["string", "null"],
+          description: "Family member name, 'me', or null for unassigned",
+        },
+        listName: { type: "string", enum: ["family_tasks", "things_to_buy"] },
+      },
+      required: ["title", "dueDate", "assigneeName", "listName"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "complete_task",
+    description: "Mark one existing task or shopping item done using words from its title.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "assign_task",
+    description: "Assign an existing open task to a family member.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" }, assigneeName: { type: "string" } },
+      required: ["query", "assigneeName"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "create_event",
+    description: "Create a family calendar event. Use null times for an all-day event.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        date: { type: "string", description: "YYYY-MM-DD" },
+        startTime: { type: ["string", "null"], description: "24-hour HH:MM, or null" },
+        endTime: { type: ["string", "null"], description: "24-hour HH:MM, or null" },
+        assigneeName: { type: ["string", "null"] },
+      },
+      required: ["title", "date", "startTime", "endTime", "assigneeName"],
+      additionalProperties: false,
+    },
+  },
+];
+
+async function executeWhatsappTool(
+  identity: Record<string, string>,
+  call: OpenAIResponseItem,
+): Promise<string> {
+  const args = JSON.parse(call.arguments ?? "{}") as Record<string, string | null>;
+  switch (call.name) {
+    case "get_agenda":
+      return agendaSummary(identity, args.range as "today" | "tomorrow" | "week");
+    case "list_tasks":
+      return taskList(
+        identity,
+        args.scope as "mine" | "open" | "all",
+        args.listName as "family_tasks" | "things_to_buy" | null,
+      );
+    case "create_task":
+      return createTaskFromTool(identity, args as Parameters<typeof createTaskFromTool>[1]);
+    case "complete_task":
+      return completeTask(identity, String(args.query ?? ""));
+    case "assign_task":
+      return assignTask(identity, String(args.query ?? ""), String(args.assigneeName ?? ""));
+    case "create_event":
+      return createEvent(identity, args as Parameters<typeof createEvent>[1]);
+    default:
+      return "That action is not available in Mesa.";
+  }
+}
+
+async function aiWhatsappReply(identity: Record<string, string>): Promise<string> {
+  const [{ data: history }, { data: person }] = await Promise.all([
+    supabase
+      .from("whatsapp_messages")
+      .select("direction, body")
+      .eq("identity_id", identity.id)
+      .order("created_at", { ascending: false })
+      .limit(10),
+    supabase.from("people").select("display_name").eq("id", identity.person_id).single(),
+  ]);
+  const input: Array<Record<string, unknown>> = (history ?? []).reverse().map((message) => ({
+    role: message.direction === "inbound" ? "user" : "assistant",
+    content: message.body,
+  }));
+  const response = await createOpenAIResponse(
+    {
+      model: OPENAI_MODEL,
+      store: false,
+      reasoning: { effort: "none" },
+      safety_identifier: await safetyIdentifier(identity.id),
+      instructions: [
+        `You are Mesa, a concise WhatsApp assistant for one authenticated family. The current date in Europe/Madrid is ${madridDateKey(new Date())}.`,
+        `The sender is ${person?.display_name ?? "the linked family member"}. Never ask for or accept family IDs, user IDs, phone numbers, passwords, or secrets.`,
+        "Use one tool for every Mesa read or write. Never claim an action succeeded without using its tool.",
+        "For shopping phrases such as buy, shopping, groceries, or we need, create the task in things_to_buy.",
+        "When the user says me, use assigneeName 'me'. Leave a task unassigned only when they do not request an assignee.",
+        "Resolve relative dates from the supplied current date. If a required date or identity is genuinely ambiguous, ask one short question instead of guessing.",
+        "Handle one Mesa action per message. If the user asks for several, ask them which to do first.",
+        "Keep text replies friendly and under 900 characters.",
+      ].join(" "),
+      input,
+      tools: whatsappTools,
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      max_output_tokens: 350,
+      text: { verbosity: "low" },
+    },
+    10_000,
+  );
+  const call = response.output.find((item) => item.type === "function_call");
+  if (call) return executeWhatsappTool(identity, call);
+  return responseText(response) || "I’m not sure how to help with that yet.";
+}
+
 Deno.serve(async (request) => {
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
   const form = await request.formData();
@@ -388,15 +804,24 @@ Deno.serve(async (request) => {
   let reply: string;
   if (normalized === "help" || normalized === "hello" || normalized === "hi") {
     reply = [
-      "Mesa commands:",
-      "• today",
+      "Ask Mesa naturally, or use a shortcut:",
+      "• today / tomorrow / week",
+      "• list / shopping list / my tasks",
       "• buy Milk",
       "• add Sign school form tomorrow",
       "• done Milk",
-      "• help",
+      "You can also say: “Add football Friday at 17:00” or “Assign the school form to Maria.”",
     ].join("\n");
   } else if (normalized === "today") {
     reply = await todaySummary(identity);
+  } else if (normalized === "tomorrow" || normalized === "week") {
+    reply = await agendaSummary(identity, normalized);
+  } else if (normalized === "list") {
+    reply = await taskList(identity, "open", null);
+  } else if (normalized === "shopping list") {
+    reply = await taskList(identity, "open", "things_to_buy");
+  } else if (normalized === "my tasks") {
+    reply = await taskList(identity, "mine", null);
   } else if (/^buy\s+/i.test(body)) {
     reply = await addTask(identity, body.replace(/^buy\s+/i, ""), "shopping");
   } else if (/^add\s+/i.test(body)) {
@@ -406,7 +831,13 @@ Deno.serve(async (request) => {
   } else if (/^done\s+/i.test(body)) {
     reply = await completeTask(identity, body.replace(/^done\s+/i, ""));
   } else {
-    reply = "I didn’t understand that yet. Send “help” to see the commands I know.";
+    try {
+      reply = await aiWhatsappReply(identity);
+    } catch (error) {
+      console.error("AI WhatsApp reply failed", error);
+      reply =
+        "Mesa AI is temporarily unavailable. The shortcuts still work—send “help” to see them.";
+    }
   }
   return respond(incomingSid, identity.family_id, identity.id, reply);
 });

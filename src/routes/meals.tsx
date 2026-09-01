@@ -7,6 +7,8 @@ import {
   Repeat2,
   History,
   SlidersHorizontal,
+  LoaderCircle,
+  TriangleAlert,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { DayCard } from "@/components/DayCard";
@@ -69,9 +71,20 @@ function MealsPage() {
             subtitle="Set a few boundaries, then let Mesa handle the deciding."
           />
           <PlannerControls />
-          <Button size="lg" className="mt-6 sm:w-auto" onClick={store.generate}>
-            <Sparkles className="h-4 w-4" /> Generate meals
+          <Button
+            size="lg"
+            className="mt-6 sm:w-auto"
+            onClick={() => void store.generate()}
+            disabled={store.generating}
+          >
+            {store.generating ? (
+              <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Sparkles className="h-4 w-4" />
+            )}
+            {store.generating ? "Planning your week…" : "Generate with Mesa AI"}
           </Button>
+          <GenerationFeedback />
         </Card>
       ) : (
         <div className="space-y-4">
@@ -93,11 +106,21 @@ function MealsPage() {
             />
           ))}
           <div className="flex flex-col gap-3 pt-2 sm:flex-row">
-            <Button variant="secondary" onClick={store.regenerateWeek}>
-              <RefreshCw className="h-4 w-4" /> Regenerate week
+            <Button
+              variant="secondary"
+              onClick={() => void store.regenerateWeek()}
+              disabled={store.generating}
+            >
+              {store.generating ? (
+                <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <RefreshCw className="h-4 w-4" />
+              )}
+              {store.generating ? "Planning…" : "Regenerate with Mesa AI"}
             </Button>
             <Button
               className="flex-1"
+              disabled={store.generating}
               onClick={() => {
                 store.approvePlan();
                 navigate({ to: "/shopping" });
@@ -106,6 +129,7 @@ function MealsPage() {
               <CheckCircle2 className="h-4 w-4" /> Approve meals & build shopping list
             </Button>
           </div>
+          <GenerationFeedback />
         </div>
       )}
       {!plan ? (
@@ -117,6 +141,30 @@ function MealsPage() {
         </div>
       ) : null}
     </AppShell>
+  );
+}
+
+function GenerationFeedback() {
+  const { generationFeedback } = useStore();
+  if (!generationFeedback) return null;
+  const warning = generationFeedback.kind === "warning";
+  return (
+    <div
+      className={`mt-3 flex items-start gap-2 rounded-2xl border px-4 py-3 text-sm ${
+        warning
+          ? "border-amber-500/30 bg-amber-500/10 text-foreground"
+          : "border-primary/20 bg-primary/10 text-foreground"
+      }`}
+      role={warning ? "alert" : "status"}
+      aria-live={warning ? "assertive" : "polite"}
+    >
+      {warning ? (
+        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+      ) : (
+        <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+      )}
+      <span>{generationFeedback.message}</span>
+    </div>
   );
 }
 

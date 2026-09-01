@@ -14,7 +14,7 @@ import {
   DEFAULT_PREFERENCES,
   DEFAULT_STAPLES,
 } from "@/data/defaults";
-import { RECIPE_MAP } from "@/data/recipes";
+import { RECIPES, RECIPE_MAP } from "@/data/recipes";
 import type {
   GenerationOptions,
   Household,
@@ -29,7 +29,16 @@ import type {
 import type { PreferredProduct, RetailerCart } from "@/domain/retail";
 import { applyPackaging, buildShoppingList } from "./grocery";
 import { buildRetailerCart, packagesFor, productById } from "./matching";
-import { buildDay, generatePlan, pickAdultRecipe, pickKidsRecipe, recomputeShared } from "./planner";
+import {
+  buildDay,
+  generatePlan,
+  isoDate,
+  pickAdultRecipe,
+  pickKidsRecipe,
+  recomputeShared,
+  startOfWeek,
+} from "./planner";
+import { getSupabaseBrowserClient } from "./supabase/client";
 
 interface AppState {
   household: Household;
@@ -59,16 +68,20 @@ const initialState: AppState = {
 
 interface StoreValue extends AppState {
   hydrated: boolean;
+  generating: boolean;
+  generationFeedback: { kind: "success" | "warning"; message: string } | null;
   setOptions: (patch: Partial<GenerationOptions>) => void;
   setPreferences: (next: HouseholdPreference) => void;
   setStaples: (next: Staple[]) => void;
-  generate: () => void;
+  generate: () => Promise<void>;
   replaceMeal: (dayId: string, groupId: string) => void;
   regenerateDay: (dayId: string) => void;
-  regenerateWeek: () => void;
+  regenerateWeek: () => Promise<void>;
   approvePlan: () => void;
   updateItem: (itemId: string, patch: Partial<ShoppingListItem>) => void;
-  addManualItem: (item: Pick<ShoppingListItem, "name" | "category" | "requiredQuantity" | "unit">) => void;
+  addManualItem: (
+    item: Pick<ShoppingListItem, "name" | "category" | "requiredQuantity" | "unit">,
+  ) => void;
   approveList: () => void;
   rateMeal: (recipeId: string, groupId: string, rating: Rating) => void;
   matchProducts: () => void;
@@ -85,6 +98,9 @@ const StoreContext = createContext<StoreValue | null>(null);
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>(initialState);
   const [hydrated, setHydrated] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [generationFeedback, setGenerationFeedback] =
+    useState<StoreValue["generationFeedback"]>(null);
 
   useEffect(() => {
     try {
@@ -115,6 +131,56 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const generateWithAi = useCallback(async () => {
+    const snapshot = state;
+    setGenerating(true);
+    setGenerationFeedback(null);
+    try {
+      const { data, error } = await getSupabaseBrowserClient().functions.invoke<{
+        plan: MealPlan;
+        model: string;
+      }>("generate-meal-plan", {
+        body: {
+          weekStart: isoDate(startOfWeek()),
+          household: snapshot.household,
+          options: snapshot.options,
+          preferences: snapshot.preferences,
+          history: snapshot.history,
+          recipes: RECIPES.map((recipe) => ({
+            id: recipe.id,
+            name: recipe.name,
+            description: recipe.description,
+            groupId: recipe.groupId,
+            minutes: recipe.minutes,
+            effort: recipe.effort,
+            complexity: recipe.complexity,
+            tags: recipe.tags,
+            protein: recipe.protein,
+            ingredientIds: recipe.ingredients.map((ingredient) => ingredient.ingredientId),
+          })),
+        },
+      });
+      if (error || !data?.plan) throw error ?? new Error("No meal plan was returned.");
+      setState((current) => ({ ...current, plan: data.plan, list: null, cart: null }));
+      setGenerationFeedback({ kind: "success", message: "Your week was planned with Mesa AI." });
+    } catch (error) {
+      console.error("AI meal generation failed; using standard planner", error);
+      setState((current) => ({
+        ...current,
+        plan: generatePlan(planInput(snapshot)),
+        list: null,
+        cart: null,
+      }));
+      setGenerationFeedback({
+        kind: "warning",
+        message:
+          "Mesa AI was unavailable, so the standard planner created this week. You can retry anytime.",
+      });
+    } finally {
+      setGenerating(false);
+    }
+  }, [planInput, state]);
+
   const value = useMemo<StoreValue>(() => {
     const usedIds = (plan: MealPlan, groupId: string) =>
       plan.days.flatMap((d) => d.meals.filter((m) => m.groupId === groupId).map((m) => m.recipeId));
@@ -122,24 +188,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return {
       ...state,
       hydrated,
+      generating,
+      generationFeedback,
       setOptions: (patch) => setState((s) => ({ ...s, options: { ...s.options, ...patch } })),
       setPreferences: (preferences) => setState((s) => ({ ...s, preferences })),
       setStaples: (staples) => setState((s) => ({ ...s, staples })),
-      generate: () =>
-        setState((s) => ({ ...s, plan: generatePlan(planInput(s)), list: null, cart: null })),
-      regenerateWeek: () =>
-        setState((s) => ({ ...s, plan: generatePlan(planInput(s)), list: null, cart: null })),
+      generate: generateWithAi,
+      regenerateWeek: generateWithAi,
       regenerateDay: (dayId) =>
         setState((s) => {
           if (!s.plan) return s;
           const days = s.plan.days.map((d) =>
             d.id === dayId
-              ? buildDay(
-                  planInput(s),
-                  d.date,
-                  usedIds(s.plan!, "adults"),
-                  usedIds(s.plan!, "kids"),
-                )
+              ? buildDay(planInput(s), d.date, usedIds(s.plan!, "adults"), usedIds(s.plan!, "kids"))
               : d,
           );
           return { ...s, plan: { ...s.plan, days, approved: false }, list: null, cart: null };
@@ -315,7 +376,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ...s,
           preferredProducts: [
             ...s.preferredProducts.filter((p) => p.ingredientId !== ingredientId),
-            { id: `pref_${ingredientId}`, householdId: s.household.id, ingredientId, retailerProductId },
+            {
+              id: `pref_${ingredientId}`,
+              householdId: s.household.id,
+              ingredientId,
+              retailerProductId,
+            },
           ],
         })),
       markCartReviewed: () =>
@@ -334,7 +400,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return { ...s, history };
         }),
     };
-  }, [state, hydrated, planInput]);
+  }, [state, hydrated, generating, generationFeedback, generateWithAi, planInput]);
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
