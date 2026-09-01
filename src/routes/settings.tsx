@@ -6,6 +6,8 @@ import {
   Check,
   ChevronRight,
   Copy,
+  Link2,
+  LoaderCircle,
   MessageCircleMore,
   LogOut,
   ShieldCheck,
@@ -113,12 +115,7 @@ function SettingsPage() {
               body="Two-way sync with a dedicated Mesa Family calendar."
               action="Connect Google"
             />
-            <ConnectionCard
-              icon={MessageCircleMore}
-              title="WhatsApp"
-              body="Add tasks and ask about the family week through a dedicated number."
-              action="Join waitlist"
-            />
+            <WhatsAppConnectionCard familyId={family!.id} people={planner.people} />
           </div>
         </section>
 
@@ -171,6 +168,196 @@ function SettingsPage() {
         </section>
       </div>
     </AppShell>
+  );
+}
+
+interface WhatsAppIdentity {
+  id: string;
+  person_id: string;
+  display_phone: string;
+  profile_name: string | null;
+}
+
+function WhatsAppConnectionCard({
+  familyId,
+  people,
+}: {
+  familyId: string;
+  people: Array<{ id: string; name: string }>;
+}) {
+  const [identities, setIdentities] = useState<WhatsAppIdentity[]>([]);
+  const [personId, setPersonId] = useState(people[0]?.id ?? "");
+  const [pairing, setPairing] = useState<{ code: string; expires_at: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getSupabaseBrowserClient()
+      .from("whatsapp_identities")
+      .select("id, person_id, display_phone, profile_name")
+      .eq("family_id", familyId)
+      .eq("active", true)
+      .then(({ data, error: loadError }) => {
+        if (loadError) setError(loadError.message);
+        else setIdentities(data ?? []);
+      });
+  }, [familyId]);
+
+  useEffect(() => {
+    if (!personId && people[0]) setPersonId(people[0].id);
+  }, [people, personId]);
+
+  async function createPairingCode() {
+    if (!personId) return;
+    setLoading(true);
+    setError(null);
+    setPairing(null);
+    const { data, error: pairingError } = await getSupabaseBrowserClient().rpc(
+      "create_whatsapp_pairing_code",
+      { target_person_id: personId },
+    );
+    if (pairingError) setError(pairingError.message);
+    else setPairing(data?.[0] ?? null);
+    setLoading(false);
+  }
+
+  async function copyPairingMessage() {
+    if (!pairing) return;
+    await navigator.clipboard.writeText(`link ${pairing.code}`);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function disconnect(identity: WhatsAppIdentity) {
+    const { error: deleteError } = await getSupabaseBrowserClient()
+      .from("whatsapp_identities")
+      .delete()
+      .eq("id", identity.id);
+    if (deleteError) {
+      setError(deleteError.message);
+      return;
+    }
+    setIdentities((current) => current.filter((item) => item.id !== identity.id));
+  }
+
+  return (
+    <Card>
+      <div className="flex items-start gap-3">
+        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-person-green text-secondary-foreground">
+          <MessageCircleMore className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="font-semibold">WhatsApp</p>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                Add tasks and ask about today from the Twilio sandbox chat.
+              </p>
+            </div>
+            {identities.length ? (
+              <span className="inline-flex items-center gap-1 text-xs font-bold text-secondary-foreground">
+                <Check className="h-4 w-4" /> Connected
+              </span>
+            ) : null}
+          </div>
+
+          {identities.length ? (
+            <div className="mt-4 space-y-2">
+              {identities.map((identity) => {
+                const person = people.find((item) => item.id === identity.person_id);
+                return (
+                  <div
+                    key={identity.id}
+                    className="flex items-center gap-3 rounded-xl bg-muted px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold">
+                        {person?.name ?? identity.profile_name ?? "Family member"}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        +{identity.display_phone.replace(/^\+/, "")}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`Disconnect WhatsApp for ${person?.name ?? "family member"}`}
+                      onClick={() => void disconnect(identity)}
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <label className="block">
+              <span className="text-xs font-semibold text-muted-foreground">Connect as</span>
+              <select
+                value={personId}
+                onChange={(event) => setPersonId(event.target.value)}
+                className="mt-1 min-h-11 w-full rounded-xl border border-border bg-card px-3 text-sm outline-none focus:border-ring focus:ring-4 focus:ring-ring/15"
+              >
+                {people.map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              variant="secondary"
+              className="min-h-11"
+              onClick={() => void createPairingCode()}
+              disabled={loading || !personId}
+            >
+              {loading ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              ) : (
+                <Link2 className="h-4 w-4" />
+              )}
+              Create link code
+            </Button>
+          </div>
+
+          {pairing ? (
+            <div className="mt-4 rounded-2xl border border-primary/20 bg-person-blue p-4">
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-primary">
+                Send this in WhatsApp
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <code className="rounded-xl bg-card px-3 py-2 text-base font-bold">
+                  link {pairing.code}
+                </code>
+                <Button variant="ghost" size="sm" onClick={() => void copyPairingMessage()}>
+                  {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  {copied ? "Copied" : "Copy"}
+                </Button>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                This one-time code expires at{" "}
+                {new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(
+                  new Date(pairing.expires_at),
+                )}
+                .
+              </p>
+            </div>
+          ) : null}
+
+          {error ? (
+            <p
+              className="mt-3 rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              role="alert"
+            >
+              {error}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </Card>
   );
 }
 

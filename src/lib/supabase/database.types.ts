@@ -865,6 +865,160 @@ export type Database = {
           },
         ];
       };
+      whatsapp_identities: {
+        Row: {
+          active: boolean;
+          display_phone: string;
+          family_id: string;
+          id: string;
+          linked_at: string;
+          person_id: string;
+          profile_name: string | null;
+          updated_at: string;
+          whatsapp_address: string;
+        };
+        Insert: {
+          active?: boolean;
+          display_phone: string;
+          family_id: string;
+          id?: string;
+          linked_at?: string;
+          person_id: string;
+          profile_name?: string | null;
+          updated_at?: string;
+          whatsapp_address: string;
+        };
+        Update: {
+          active?: boolean;
+          display_phone?: string;
+          family_id?: string;
+          id?: string;
+          linked_at?: string;
+          person_id?: string;
+          profile_name?: string | null;
+          updated_at?: string;
+          whatsapp_address?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_identities_family_id_fkey";
+            columns: ["family_id"];
+            isOneToOne: false;
+            referencedRelation: "families";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_identities_person_id_fkey";
+            columns: ["person_id"];
+            isOneToOne: false;
+            referencedRelation: "people";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      whatsapp_messages: {
+        Row: {
+          body: string;
+          created_at: string;
+          direction: string;
+          family_id: string | null;
+          identity_id: string | null;
+          message_sid: string;
+          metadata: Json;
+          status: string;
+        };
+        Insert: {
+          body?: string;
+          created_at?: string;
+          direction: string;
+          family_id?: string | null;
+          identity_id?: string | null;
+          message_sid: string;
+          metadata?: Json;
+          status?: string;
+        };
+        Update: {
+          body?: string;
+          created_at?: string;
+          direction?: string;
+          family_id?: string | null;
+          identity_id?: string | null;
+          message_sid?: string;
+          metadata?: Json;
+          status?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_messages_family_id_fkey";
+            columns: ["family_id"];
+            isOneToOne: false;
+            referencedRelation: "families";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_messages_identity_id_fkey";
+            columns: ["identity_id"];
+            isOneToOne: false;
+            referencedRelation: "whatsapp_identities";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      whatsapp_pairing_codes: {
+        Row: {
+          code: string;
+          created_at: string;
+          created_by: string;
+          expires_at: string;
+          family_id: string;
+          id: string;
+          person_id: string;
+          used_at: string | null;
+        };
+        Insert: {
+          code: string;
+          created_at?: string;
+          created_by: string;
+          expires_at?: string;
+          family_id: string;
+          id?: string;
+          person_id: string;
+          used_at?: string | null;
+        };
+        Update: {
+          code?: string;
+          created_at?: string;
+          created_by?: string;
+          expires_at?: string;
+          family_id?: string;
+          id?: string;
+          person_id?: string;
+          used_at?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_pairing_codes_created_by_fkey";
+            columns: ["created_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_pairing_codes_family_id_fkey";
+            columns: ["family_id"];
+            isOneToOne: false;
+            referencedRelation: "families";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_pairing_codes_person_id_fkey";
+            columns: ["person_id"];
+            isOneToOne: false;
+            referencedRelation: "people";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -873,6 +1027,13 @@ export type Database = {
       accept_family_invitation: {
         Args: { invitation_token: string };
         Returns: string;
+      };
+      create_whatsapp_pairing_code: {
+        Args: { target_person_id: string };
+        Returns: {
+          code: string;
+          expires_at: string;
+        }[];
       };
     };
     Enums: {
