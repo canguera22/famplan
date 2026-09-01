@@ -13,6 +13,11 @@ const PRIMARY_NAV = [
   { to: "/lists", label: "Lists", icon: ListTodo },
 ] as const;
 
+const MOBILE_NAV = [
+  ...PRIMARY_NAV,
+  { to: "/settings", label: "Settings", icon: Settings },
+] as const;
+
 const MEAL_NAV = [
   { to: "/shopping", label: "Shopping list", icon: ShoppingBasket },
   { to: "/preferences", label: "Meal preferences", icon: Settings },
@@ -132,7 +137,7 @@ export function AppShell({
       </div>
 
       <nav className="mobile-nav lg:hidden" aria-label="Primary navigation">
-        {PRIMARY_NAV.map((item) => (
+        {MOBILE_NAV.map((item) => (
           <Link
             key={item.to}
             to={item.to}
