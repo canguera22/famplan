@@ -1,0 +1,2 @@
+-- Development seed data is intentionally empty. Authenticated users create
+-- their own family workspace through the app so RLS remains representative.

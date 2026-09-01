@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Mesa — Mercadona cart helper",
+  "version": "0.2.0",
+  "description": "Populates your existing Mercadona cart with a Mesa-approved basket. Never buys, pays or checks out.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": ["https://tienda.mercadona.es/*"],
+  "background": { "service_worker": "background/service-worker.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["https://tienda.mercadona.es/*"],
+      "js": ["content/mercadona-page.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://tienda.mercadona.es/*"],
+      "js": ["content/mercadona.js"],
+      "world": "ISOLATED",
+      "run_at": "document_idle"
+    }
+  ],
+  "externally_connectable": { "matches": ["https://*.lovable.app/*", "http://localhost:8080/*"] },
+  "action": { "default_title": "Mesa" }
+}
