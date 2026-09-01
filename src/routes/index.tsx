@@ -74,18 +74,21 @@ function HomePage() {
           label="Today"
           value={`${todayEvents.length + dueToday.length} planned`}
           tone="blue"
+          to="/calendar"
         />
         <SummaryCard
           icon={ListTodo}
           label="Open tasks"
           value={String(openTasks.length)}
           tone="green"
+          to="/lists"
         />
         <SummaryCard
           icon={Circle}
           label="Need an owner"
           value={String(unassigned.length)}
           tone="amber"
+          to="/lists"
         />
       </section>
 
@@ -104,7 +107,11 @@ function HomePage() {
                   {todayEvents.map((event) => {
                     const person = personFor(planner.people, event.assigneeId);
                     return (
-                      <div key={event.id} className="flex gap-4 px-4 py-4 sm:px-5">
+                      <Link
+                        key={event.id}
+                        to="/calendar"
+                        className="flex min-h-14 gap-4 px-4 py-4 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-inset focus-visible:ring-ring/15 sm:px-5"
+                      >
                         <div className="w-16 shrink-0 pt-0.5 text-sm font-bold tabular-nums text-primary">
                           {event.allDay ? "All day" : formatTime(event.startsAt)}
                         </div>
@@ -126,7 +133,7 @@ function HomePage() {
                             color={person.color}
                           />
                         ) : null}
-                      </div>
+                      </Link>
                     );
                   })}
                   {dueToday.map((task) => (
@@ -148,11 +155,11 @@ function HomePage() {
           <section aria-labelledby="week-heading">
             <SectionHeading
               id="week-heading"
-              title="The next seven days"
+              title="Coming up"
               linkTo="/calendar"
               linkLabel="See full week"
             />
-            <WeekStrip />
+            <UpcomingAgenda />
           </section>
         </div>
 
@@ -212,7 +219,11 @@ function HomePage() {
             <Card className="space-y-3">
               {unassigned.length ? (
                 unassigned.slice(0, 3).map((task) => (
-                  <div key={task.id} className="flex items-start gap-3">
+                  <Link
+                    key={task.id}
+                    to="/lists"
+                    className="flex min-h-11 items-start gap-3 rounded-xl p-1 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/15"
+                  >
                     <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
                     <div className="min-w-0">
                       <p className="text-sm font-semibold">{task.title}</p>
@@ -220,7 +231,7 @@ function HomePage() {
                         Waiting for someone to take it
                       </p>
                     </div>
-                  </div>
+                  </Link>
                 ))
               ) : (
                 <p className="text-sm text-muted-foreground">Everything has an owner.</p>
@@ -238,11 +249,13 @@ function SummaryCard({
   label,
   value,
   tone,
+  to,
 }: {
   icon: typeof CalendarDays;
   label: string;
   value: string;
   tone: "blue" | "green" | "amber";
+  to: "/calendar" | "/lists";
 }) {
   const tones = {
     blue: "bg-person-blue text-primary",
@@ -250,15 +263,22 @@ function SummaryCard({
     amber: "bg-person-amber text-accent-foreground",
   };
   return (
-    <Card className="flex items-center gap-3 p-4">
-      <span className={cn("grid h-11 w-11 place-items-center rounded-2xl", tones[tone])}>
-        <Icon className="h-5 w-5" />
-      </span>
-      <div>
-        <p className="text-xs font-semibold text-muted-foreground">{label}</p>
-        <p className="mt-0.5 text-lg font-bold">{value}</p>
-      </div>
-    </Card>
+    <Link
+      to={to}
+      aria-label={`${label}: ${value}`}
+      className="group rounded-3xl focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20"
+    >
+      <Card className="flex h-full min-h-20 items-center gap-3 p-4 transition-colors group-hover:border-primary/30 group-hover:bg-muted/60">
+        <span className={cn("grid h-11 w-11 place-items-center rounded-2xl", tones[tone])}>
+          <Icon className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold text-muted-foreground">{label}</p>
+          <p className="mt-0.5 text-lg font-bold">{value}</p>
+        </div>
+        <ArrowRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
+      </Card>
+    </Link>
   );
 }
 
@@ -303,7 +323,12 @@ function HomeTaskRow({ task }: { task: FamilyTask }) {
         <Circle className="h-5 w-5" />
       </button>
       <div className="min-w-0 flex-1 pt-2">
-        <p className="font-semibold">{task.title}</p>
+        <Link
+          to="/lists"
+          className="block rounded-lg font-semibold hover:text-primary focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/15"
+        >
+          {task.title}
+        </Link>
         <p className="mt-0.5 text-sm text-muted-foreground">
           Due today{person ? ` · ${person.name}` : " · Unassigned"}
         </p>
@@ -344,42 +369,80 @@ function PersonBadge({
   );
 }
 
-function WeekStrip() {
+function UpcomingAgenda() {
   const planner = useFamilyPlanner();
-  const days = Array.from({ length: 7 }, (_, offset) => {
-    const date = new Date();
-    date.setHours(12, 0, 0, 0);
-    date.setDate(date.getDate() + offset);
-    return date;
-  });
+  const start = new Date();
+  start.setHours(23, 59, 59, 999);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  const upcoming = [
+    ...planner.events.map((event) => ({
+      id: `event-${event.id}`,
+      title: event.title,
+      at: event.startsAt,
+      assigneeId: event.assigneeId,
+      kind: "Event",
+    })),
+    ...planner.tasks
+      .filter((task) => task.status !== "done" && task.dueAt)
+      .map((task) => ({
+        id: `task-${task.id}`,
+        title: task.title,
+        at: task.dueAt!,
+        assigneeId: task.assigneeId,
+        kind: "Task",
+      })),
+  ]
+    .filter((item) => {
+      const date = new Date(item.at);
+      return date > start && date <= end;
+    })
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .slice(0, 6);
+
   return (
-    <div className="grid grid-cols-4 gap-2 sm:grid-cols-7">
-      {days.map((date, index) => {
-        const key = dateKey(date);
-        const count =
-          planner.events.filter((event) => dateKey(event.startsAt) === key).length +
-          planner.tasks.filter(
-            (task) => task.showOnCalendar && task.dueAt && dateKey(task.dueAt) === key,
-          ).length;
-        return (
-          <Link
-            key={key}
-            to="/calendar"
-            className={cn(
-              "flex min-h-24 flex-col items-center justify-center rounded-2xl border border-border bg-card p-2 text-center transition-colors hover:border-primary/40",
-              index === 0 && "border-primary/30 bg-person-blue",
-            )}
-          >
-            <span className="text-[0.68rem] font-bold uppercase tracking-wide text-muted-foreground">
-              {new Intl.DateTimeFormat("en", { weekday: "short" }).format(date)}
-            </span>
-            <span className="mt-1 text-xl font-bold tabular-nums">{date.getDate()}</span>
-            <span className="mt-1 text-[0.68rem] font-semibold text-muted-foreground">
-              {count ? `${count} item${count > 1 ? "s" : ""}` : "Clear"}
-            </span>
-          </Link>
-        );
-      })}
-    </div>
+    <Card className="overflow-hidden p-0">
+      {upcoming.length ? (
+        <div className="divide-y divide-border">
+          {upcoming.map((item) => {
+            const person = personFor(planner.people, item.assigneeId);
+            return (
+              <Link
+                key={item.id}
+                to="/calendar"
+                className="grid min-h-16 grid-cols-[4.25rem_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-inset focus-visible:ring-ring/15 sm:px-5"
+              >
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-primary">
+                    {new Intl.DateTimeFormat("en", { weekday: "short" }).format(new Date(item.at))}
+                  </p>
+                  <p className="text-sm font-semibold tabular-nums text-muted-foreground">
+                    {new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(
+                      new Date(item.at),
+                    )}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold">{item.title}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {item.kind}
+                    {person ? ` · ${person.name}` : " · Family"}
+                  </p>
+                </div>
+                <ArrowRight className="h-4 w-4 text-muted-foreground" />
+              </Link>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="px-5 py-8 text-center">
+          <CalendarDays className="mx-auto h-7 w-7 text-secondary-foreground" />
+          <p className="mt-3 font-semibold">The week ahead is clear</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            New dated tasks and events will appear here automatically.
+          </p>
+        </div>
+      )}
+    </Card>
   );
 }

@@ -3,6 +3,7 @@ export type TaskPriority = "low" | "normal" | "high";
 
 export interface FamilyPerson {
   id: string;
+  userId: string | null;
   name: string;
   shortName: string;
   color: "blue" | "green" | "amber" | "violet";

@@ -252,7 +252,7 @@ function WhatsAppConnectionCard({
             <div>
               <p className="font-semibold">WhatsApp</p>
               <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                Add tasks and ask about today from the Twilio sandbox chat.
+                Add tasks, shopping items, and ask about today from your Mesa WhatsApp chat.
               </p>
             </div>
             {identities.length ? (

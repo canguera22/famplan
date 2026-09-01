@@ -47,16 +47,24 @@ const FamilyPlannerContext = createContext<FamilyPlannerValue | null>(null);
 
 const PERSON_COLORS: FamilyPerson["color"][] = ["blue", "green", "amber", "violet"];
 
-function personFromRow(row: PersonRow, index: number): FamilyPerson {
-  const savedColor = row.color as FamilyPerson["color"];
-  return {
-    id: row.id,
-    name: row.display_name,
-    shortName: row.display_name.slice(0, 1).toUpperCase(),
-    color: PERSON_COLORS.includes(savedColor)
-      ? savedColor
-      : PERSON_COLORS[index % PERSON_COLORS.length]!,
-  };
+function peopleFromRows(rows: PersonRow[]): FamilyPerson[] {
+  const usedColors = new Set<FamilyPerson["color"]>();
+  return rows.map((row, index) => {
+    const savedColor = row.color as FamilyPerson["color"];
+    const color =
+      PERSON_COLORS.includes(savedColor) && !usedColors.has(savedColor)
+        ? savedColor
+        : (PERSON_COLORS.find((candidate) => !usedColors.has(candidate)) ??
+          PERSON_COLORS[index % PERSON_COLORS.length]!);
+    usedColors.add(color);
+    return {
+      id: row.id,
+      userId: row.user_id,
+      name: row.display_name,
+      shortName: row.display_name.slice(0, 1).toUpperCase(),
+      color,
+    };
+  });
 }
 
 function listFromRow(row: ListRow): FamilyList {
@@ -133,7 +141,7 @@ export function FamilyPlannerProvider({ children }: { children: ReactNode }) {
     if (firstError) throw firstError;
 
     setState({
-      people: (peopleResult.data ?? []).map(personFromRow),
+      people: peopleFromRows(peopleResult.data ?? []),
       lists: (listsResult.data ?? []).map(listFromRow),
       tasks: (tasksResult.data ?? []).map(taskFromRow),
       events: (eventsResult.data ?? []).map(eventFromRow),

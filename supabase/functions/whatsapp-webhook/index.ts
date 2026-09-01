@@ -239,7 +239,11 @@ async function todaySummary(identity: Record<string, string>): Promise<string> {
   return lines.join("\n");
 }
 
-async function addTask(identity: Record<string, string>, rawTitle: string): Promise<string> {
+async function addTask(
+  identity: Record<string, string>,
+  rawTitle: string,
+  destination: "tasks" | "shopping" = "tasks",
+): Promise<string> {
   const nowKey = madridDateKey(new Date());
   const wantsTomorrow = /\btomorrow\b/i.test(rawTitle);
   const wantsToday = /\btoday\b/i.test(rawTitle);
@@ -248,20 +252,27 @@ async function addTask(identity: Record<string, string>, rawTitle: string): Prom
     .replace(/\b(today|tomorrow)\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!title) return "Tell me what to add—for example: add Buy milk tomorrow";
+  if (!title) {
+    return destination === "shopping"
+      ? "Tell me what to buy—for example: buy Milk"
+      : "Tell me what to add—for example: add Sign school form tomorrow";
+  }
 
+  const listQuery = supabase.from("lists").select("id, name").eq("family_id", identity.family_id);
+  const selectedListQuery =
+    destination === "shopping"
+      ? listQuery.ilike("name", "Things to buy").limit(1).single()
+      : listQuery.order("position").limit(1).single();
   const [{ data: list }, { data: person }, { data: family }] = await Promise.all([
-    supabase
-      .from("lists")
-      .select("id")
-      .eq("family_id", identity.family_id)
-      .order("position")
-      .limit(1)
-      .single(),
+    selectedListQuery,
     supabase.from("people").select("user_id").eq("id", identity.person_id).single(),
     supabase.from("families").select("created_by").eq("id", identity.family_id).single(),
   ]);
-  if (!list || !family) return "Mesa could not find your family task board.";
+  if (!list || !family) {
+    return destination === "shopping"
+      ? "Mesa could not find your Things to buy list. Open Mesa once, then try again."
+      : "Mesa could not find your family task board.";
+  }
   const createdBy = person?.user_id ?? family.created_by;
   const dueAt = dueKey ? zonedDateAt(dueKey, 9) : null;
   const { data: card, error } = await supabase
@@ -283,7 +294,8 @@ async function addTask(identity: Record<string, string>, rawTitle: string): Prom
     console.error("WhatsApp task insert failed", error);
     return "Mesa could not add that task. Please try again.";
   }
-  return `Added “${title}” and assigned it to you${dueKey ? ` for ${wantsTomorrow ? "tomorrow" : "today"}` : ""}. Ref ${card.id.slice(0, 8)}.`;
+  const destinationLabel = destination === "shopping" ? " to Things to buy" : "";
+  return `Added “${title}”${destinationLabel} and assigned it to you${dueKey ? ` for ${wantsTomorrow ? "tomorrow" : "today"}` : ""}. Ref ${card.id.slice(0, 8)}.`;
 }
 
 async function completeTask(identity: Record<string, string>, query: string): Promise<string> {
@@ -378,15 +390,19 @@ Deno.serve(async (request) => {
     reply = [
       "Mesa commands:",
       "• today",
-      "• add Buy milk",
+      "• buy Milk",
       "• add Sign school form tomorrow",
-      "• done Buy milk",
+      "• done Milk",
       "• help",
     ].join("\n");
   } else if (normalized === "today") {
     reply = await todaySummary(identity);
+  } else if (/^buy\s+/i.test(body)) {
+    reply = await addTask(identity, body.replace(/^buy\s+/i, ""), "shopping");
   } else if (/^add\s+/i.test(body)) {
-    reply = await addTask(identity, body.replace(/^add\s+/i, ""));
+    const taskText = body.replace(/^add\s+/i, "");
+    const isShoppingItem = /^buy\s+/i.test(taskText);
+    reply = await addTask(identity, taskText, isShoppingItem ? "shopping" : "tasks");
   } else if (/^done\s+/i.test(body)) {
     reply = await completeTask(identity, body.replace(/^done\s+/i, ""));
   } else {

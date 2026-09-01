@@ -1,9 +1,17 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { CalendarCheck2, ChevronLeft, ChevronRight, Clock3, ListTodo } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { Button, Card } from "@/components/ui-kit";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { FamilyPerson } from "@/domain/family";
+import { useAuth } from "@/lib/auth";
 import { personFor, useFamilyPlanner } from "@/lib/family-store";
 import { cn } from "@/lib/utils";
 
@@ -15,7 +23,9 @@ export const Route = createFileRoute("/calendar")({
 interface CalendarDisplayItem {
   id: string;
   title: string;
+  description: string;
   at: string;
+  endsAt: string | null;
   allDay: boolean;
   assigneeId: string | null;
   kind: "event" | "task";
@@ -37,7 +47,10 @@ function dayKey(value: string | Date): string {
 
 function CalendarPage() {
   const planner = useFamilyPlanner();
+  const { user } = useAuth();
   const [anchor, setAnchor] = useState(() => startOfWeek(new Date()));
+  const [selectedItem, setSelectedItem] = useState<CalendarDisplayItem | null>(null);
+  const currentPerson = planner.people.find((person) => person.userId === user?.id);
   const days = useMemo(
     () =>
       Array.from({ length: 7 }, (_, index) => {
@@ -54,7 +67,9 @@ function CalendarPage() {
       ...planner.events.map((event) => ({
         id: event.id,
         title: event.title,
+        description: event.description,
         at: event.startsAt,
+        endsAt: event.endsAt,
         allDay: event.allDay,
         assigneeId: event.assigneeId,
         kind: "event" as const,
@@ -65,7 +80,9 @@ function CalendarPage() {
         .map((task) => ({
           id: task.id,
           title: task.title,
+          description: task.notes,
           at: task.dueAt!,
+          endsAt: null,
           allDay: task.allDay,
           assigneeId: task.assigneeId,
           kind: "task" as const,
@@ -116,6 +133,34 @@ function CalendarPage() {
         </div>
       </div>
 
+      <div
+        className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2"
+        aria-label="Family color key"
+      >
+        {planner.people.map((person) => (
+          <span
+            key={person.id}
+            className="inline-flex min-h-8 items-center gap-2 text-xs font-bold"
+          >
+            <span
+              className={cn(
+                "h-3 w-3 rounded-full ring-2 ring-background",
+                personTone(person.color).dot,
+              )}
+              aria-hidden="true"
+            />
+            {person.name}
+            {person.id === currentPerson?.id ? (
+              <span className="font-semibold text-primary">You</span>
+            ) : null}
+          </span>
+        ))}
+        <span className="inline-flex min-h-8 items-center gap-2 text-xs font-bold text-muted-foreground">
+          <span className="h-3 w-3 rounded-full bg-muted-foreground/50 ring-2 ring-background" />
+          Family / unassigned
+        </span>
+      </div>
+
       <div className="hidden overflow-hidden rounded-3xl border border-border bg-card md:grid md:grid-cols-7">
         {days.map((date) => {
           const dateItems = items
@@ -156,6 +201,8 @@ function CalendarPage() {
                     key={`${item.kind}_${item.id}`}
                     item={item}
                     person={personFor(planner.people, item.assigneeId)}
+                    isMine={item.assigneeId === currentPerson?.id}
+                    onSelect={() => setSelectedItem(item)}
                     compact
                   />
                 ))}
@@ -200,6 +247,8 @@ function CalendarPage() {
                         key={`${item.kind}_${item.id}`}
                         item={item}
                         person={personFor(planner.people, item.assigneeId)}
+                        isMine={item.assigneeId === currentPerson?.id}
+                        onSelect={() => setSelectedItem(item)}
                       />
                     ))}
                   </div>
@@ -211,29 +260,77 @@ function CalendarPage() {
           );
         })}
       </div>
+
+      {selectedItem ? (
+        <CalendarItemDetail
+          item={selectedItem}
+          person={personFor(planner.people, selectedItem.assigneeId)}
+          isMine={selectedItem.assigneeId === currentPerson?.id}
+          onClose={() => setSelectedItem(null)}
+        />
+      ) : null}
     </AppShell>
   );
+}
+
+const PERSON_TONES = {
+  blue: { dot: "bg-primary", border: "border-l-primary", soft: "bg-person-blue text-primary" },
+  green: {
+    dot: "bg-secondary-foreground",
+    border: "border-l-secondary-foreground",
+    soft: "bg-person-green text-secondary-foreground",
+  },
+  amber: {
+    dot: "bg-accent",
+    border: "border-l-accent",
+    soft: "bg-person-amber text-accent-foreground",
+  },
+  violet: {
+    dot: "bg-violet-600",
+    border: "border-l-violet-600",
+    soft: "bg-person-violet text-violet-700",
+  },
+} as const;
+
+function personTone(color?: FamilyPerson["color"]) {
+  return color
+    ? PERSON_TONES[color]
+    : {
+        dot: "bg-muted-foreground/50",
+        border: "border-l-muted-foreground/40",
+        soft: "bg-muted text-muted-foreground",
+      };
 }
 
 function CalendarItem({
   item,
   person,
+  isMine,
+  onSelect,
   compact = false,
 }: {
   item: CalendarDisplayItem;
   person: FamilyPerson | undefined;
+  isMine: boolean;
+  onSelect: () => void;
   compact?: boolean;
 }) {
+  const tone = personTone(person?.color);
   const time = item.allDay
     ? "All day"
     : new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(
         new Date(item.at),
       );
   return (
-    <div
+    <button
+      type="button"
+      onClick={onSelect}
       className={cn(
-        "relative",
-        compact ? "rounded-xl border border-border p-2.5" : "flex gap-3 px-4 py-4",
+        "relative w-full cursor-pointer text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/15",
+        compact
+          ? "rounded-xl border border-border border-l-4 p-2.5"
+          : "flex min-h-14 gap-3 border-l-4 px-4 py-4",
+        tone.border,
         item.done && "opacity-55",
       )}
     >
@@ -264,21 +361,121 @@ function CalendarItem({
           {item.title}
         </p>
         {!compact ? (
-          <div className="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <Clock3 className="h-3.5 w-3.5" />
             {time}
             {person ? ` · ${person.name}` : ""}
+            {isMine ? (
+              <span className="rounded-full bg-person-blue px-2 py-0.5 font-bold text-primary">
+                Assigned to you
+              </span>
+            ) : person ? (
+              <span className="font-semibold">Assigned to someone else</span>
+            ) : null}
           </div>
-        ) : null}
+        ) : (
+          <span
+            className={cn(
+              "mt-1.5 inline-flex rounded-full px-2 py-0.5 text-[0.65rem] font-bold",
+              tone.soft,
+            )}
+          >
+            {isMine ? "You" : (person?.shortName ?? "Family")}
+          </span>
+        )}
       </div>
       {person && !compact ? (
         <span
-          className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-muted text-[0.68rem] font-bold"
+          className={cn(
+            "grid h-8 w-8 shrink-0 place-items-center rounded-full text-[0.68rem] font-bold",
+            tone.soft,
+          )}
           title={person.name}
         >
           {person.shortName}
         </span>
       ) : null}
-    </div>
+    </button>
+  );
+}
+
+function CalendarItemDetail({
+  item,
+  person,
+  isMine,
+  onClose,
+}: {
+  item: CalendarDisplayItem;
+  person: FamilyPerson | undefined;
+  isMine: boolean;
+  onClose: () => void;
+}) {
+  const date = new Date(item.at);
+  const tone = personTone(person?.color);
+  const dateLabel = new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+  const timeLabel = item.allDay
+    ? "All day"
+    : new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(date);
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="w-[calc(100%-1.5rem)] rounded-3xl p-5 sm:max-w-lg sm:p-6">
+        <DialogHeader className="pr-8 text-left">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">
+            {item.kind === "task" ? (
+              <ListTodo className="h-4 w-4" />
+            ) : (
+              <CalendarCheck2 className="h-4 w-4" />
+            )}
+            {item.kind}
+          </div>
+          <DialogTitle className="pt-2 text-2xl leading-tight">{item.title}</DialogTitle>
+          <DialogDescription>{dateLabel}</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="grid gap-3 rounded-2xl bg-muted p-4 sm:grid-cols-2">
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground">When</p>
+              <p className="mt-1 text-sm font-bold">{timeLabel}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground">Assigned to</p>
+              <span
+                className={cn(
+                  "mt-1 inline-flex min-h-8 items-center gap-2 rounded-full px-2.5 text-xs font-bold",
+                  tone.soft,
+                )}
+              >
+                <span className={cn("h-2.5 w-2.5 rounded-full", tone.dot)} />
+                {person ? `${person.name}${isMine ? " · You" : ""}` : "Family / unassigned"}
+              </span>
+            </div>
+          </div>
+
+          {item.description ? (
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground">Details</p>
+              <p className="mt-1 text-sm leading-6">{item.description}</p>
+            </div>
+          ) : null}
+
+          {item.kind === "task" ? (
+            <Link to="/lists" onClick={onClose}>
+              <Button className="w-full">Open in lists</Button>
+            </Link>
+          ) : (
+            <Button variant="secondary" className="w-full" onClick={onClose}>
+              Close
+            </Button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
