@@ -16,6 +16,7 @@ import { AppShell } from "@/components/AppShell";
 import { Button, Card, Field, TextInput, Toggle } from "@/components/ui-kit";
 import { useFamilyPlanner } from "@/lib/family-store";
 import { useAuth } from "@/lib/auth";
+import { publicSiteLink } from "@/lib/site-url";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export const Route = createFileRoute("/settings")({
@@ -202,7 +203,7 @@ function FamilyInvitations({ familyId, userId }: { familyId: string; userId: str
   }, [familyId]);
 
   function invitationLink(token: string) {
-    return `${window.location.origin}/join?token=${token}`;
+    return publicSiteLink(`/join?token=${token}`);
   }
 
   async function createInvitation(event: FormEvent) {

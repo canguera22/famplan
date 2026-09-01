@@ -3,6 +3,7 @@ import { FormEvent, useState } from "react";
 import { ArrowRight, CheckCircle2, LoaderCircle, Mail, ShieldCheck, Users } from "lucide-react";
 import { Button, Card, Field, TextInput } from "@/components/ui-kit";
 import { useAuth } from "@/lib/auth";
+import { publicSiteLink } from "@/lib/site-url";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export const Route = createFileRoute("/join")({
@@ -35,7 +36,7 @@ function JoinFamilyPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const redirectTo = `${window.location.origin}/join?token=${encodeURIComponent(token)}`;
+      const redirectTo = publicSiteLink(`/join?token=${encodeURIComponent(token)}`);
       await sendMagicLink(email, redirectTo);
       setSent(true);
     } catch (caught) {

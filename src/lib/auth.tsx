@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { Database } from "@/lib/supabase/database.types";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { getPublicSiteUrl } from "@/lib/site-url";
 
 type Profile = Database["public"]["Tables"]["profiles"]["Row"];
 
@@ -124,7 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           email: email.trim(),
           options: {
             shouldCreateUser: true,
-            emailRedirectTo: redirectTo ?? window.location.origin,
+            emailRedirectTo: redirectTo ?? getPublicSiteUrl(),
           },
         });
         if (signInError) throw signInError;
