@@ -11,7 +11,8 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "
 const TWILIO_AUTH_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_WEBHOOK_URL = Deno.env.get("TWILIO_WEBHOOK_URL") ?? "";
 const TIME_ZONE = "Europe/Madrid";
-const OPENAI_MODEL = "gpt-5.6-terra";
+const INTERPRETER_MODEL = "gpt-5.6-luna";
+const CONVERSATION_MODEL = "gpt-5.6-terra";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -85,6 +86,16 @@ function validDateKey(value: string): boolean {
 
 function validClock(value: string | null): boolean {
   return value === null || /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+function likelyCompoundRequest(value: string): boolean {
+  return (
+    /\b(?:two|three|four|five)\s+(?:tasks?|items?|events?)\b/i.test(value) ||
+    /\bthe following\b/i.test(value) ||
+    /[;\n]/.test(value) ||
+    /\.\s+(?:add|buy|create|schedule|remind|assign|update|call|book)\b/i.test(value) ||
+    /\b(?:and then|then)\s+(?:add|buy|create|schedule|remind|assign|complete|mark)\b/i.test(value)
+  );
 }
 
 function zonedDateAt(dateKey: string, hour: number, minute = 0): string {
@@ -383,8 +394,23 @@ async function agendaSummary(
   const today = madridDateKey(new Date());
   const startKey = range === "tomorrow" ? addDays(today, 1) : today;
   const days = range === "week" ? 7 : 1;
+  const endKey = addDays(startKey, days - 1);
+  const label = range === "week" ? "Next seven days" : range[0]!.toUpperCase() + range.slice(1);
+  return agendaForDates(identity, startKey, endKey, label);
+}
+
+async function agendaForDates(
+  identity: Record<string, string>,
+  startKey: string,
+  endKey: string,
+  label = startKey === endKey ? startKey : `${startKey} to ${endKey}`,
+): Promise<string> {
+  if (!validDateKey(startKey) || !validDateKey(endKey)) return "I need a valid agenda date.";
+  const span =
+    (Date.parse(`${endKey}T00:00:00Z`) - Date.parse(`${startKey}T00:00:00Z`)) / 86_400_000;
+  if (span < 0 || span > 14) return "I can show an agenda range of up to 15 days.";
   const start = zonedDateAt(startKey, 0);
-  const end = zonedDateAt(addDays(startKey, days), 0);
+  const end = zonedDateAt(addDays(endKey, 1), 0);
   const [eventsResult, tasksResult] = await Promise.all([
     supabase
       .from("calendar_events")
@@ -407,20 +433,18 @@ async function agendaSummary(
   ]);
   const events = eventsResult.data ?? [];
   const tasks = tasksResult.data ?? [];
-  if (!events.length && !tasks.length)
-    return `${range === "week" ? "The next seven days are" : range === "tomorrow" ? "Tomorrow is" : "Today is"} clear.`;
-  const lines = [
-    `${range === "week" ? "Next seven days" : range[0]!.toUpperCase() + range.slice(1)} in Mesa:`,
-  ];
+  if (!events.length && !tasks.length) return `${label} is clear.`;
+  const showDates = startKey !== endKey;
+  const lines = [`${label} in Mesa:`];
   for (const event of events) {
     const day = madridDateKey(event.starts_at);
     lines.push(
-      `• ${range === "week" ? `${day} · ` : ""}${event.all_day ? "All day" : madridTime(event.starts_at)} — ${event.title}`,
+      `• ${showDates ? `${day} · ` : ""}${event.all_day ? "All day" : madridTime(event.starts_at)} — ${event.title}`,
     );
   }
   for (const task of tasks) {
     const day = madridDateKey(task.due_at!);
-    lines.push(`• ${range === "week" ? `${day} · ` : ""}Task — ${task.title}`);
+    lines.push(`• ${showDates ? `${day} · ` : ""}Task — ${task.title}`);
   }
   return lines.join("\n");
 }
@@ -589,12 +613,16 @@ const whatsappTools = [
     type: "function",
     name: "get_agenda",
     description:
-      "Read family calendar events and due tasks for today, tomorrow, or the next seven days.",
+      "Read family calendar events and due tasks for a named range or exact inclusive date range.",
     strict: true,
     parameters: {
       type: "object",
-      properties: { range: { type: "string", enum: ["today", "tomorrow", "week"] } },
-      required: ["range"],
+      properties: {
+        range: { type: ["string", "null"], enum: ["today", "tomorrow", "week", null] },
+        dateFrom: { type: ["string", "null"], description: "YYYY-MM-DD, or null" },
+        dateTo: { type: ["string", "null"], description: "YYYY-MM-DD inclusive, or null" },
+      },
+      required: ["range", "dateFrom", "dateTo"],
       additionalProperties: false,
     },
   },
@@ -685,8 +713,11 @@ async function executeWhatsappTool(
 ): Promise<string> {
   const args = JSON.parse(call.arguments ?? "{}") as Record<string, string | null>;
   switch (call.name) {
-    case "get_agenda":
-      return agendaSummary(identity, args.range as "today" | "tomorrow" | "week");
+    case "get_agenda": {
+      if (args.dateFrom && args.dateTo) return agendaForDates(identity, args.dateFrom, args.dateTo);
+      if (args.range) return agendaSummary(identity, args.range as "today" | "tomorrow" | "week");
+      return "Tell me which date or date range you want to see.";
+    }
     case "list_tasks":
       return taskList(
         identity,
@@ -716,38 +747,94 @@ async function aiWhatsappReply(identity: Record<string, string>): Promise<string
       .limit(10),
     supabase.from("people").select("display_name").eq("id", identity.person_id).single(),
   ]);
-  const input: Array<Record<string, unknown>> = (history ?? []).reverse().map((message) => ({
-    role: message.direction === "inbound" ? "user" : "assistant",
-    content: message.body,
-  }));
-  const response = await createOpenAIResponse(
+  const messagesNewestFirst = history ?? [];
+  const latestRequest = messagesNewestFirst.find(
+    (message) => message.direction === "inbound",
+  )?.body;
+  const input: Array<Record<string, unknown>> = [...messagesNewestFirst]
+    .reverse()
+    .map((message) => ({
+      role: message.direction === "inbound" ? "user" : "assistant",
+      content: message.body,
+    }));
+  const safetyId = await safetyIdentifier(identity.id);
+  const interpretation = await createOpenAIResponse(
     {
-      model: OPENAI_MODEL,
+      model: INTERPRETER_MODEL,
       store: false,
       reasoning: { effort: "none" },
-      safety_identifier: await safetyIdentifier(identity.id),
+      safety_identifier: safetyId,
       instructions: [
-        `You are Mesa, a concise WhatsApp assistant for one authenticated family. The current date in Europe/Madrid is ${madridDateKey(new Date())}.`,
+        `You interpret requests for Mesa, an authenticated family planner. The current date in Europe/Madrid is ${madridDateKey(new Date())}.`,
         `The sender is ${person?.display_name ?? "the linked family member"}. Never ask for or accept family IDs, user IDs, phone numbers, passwords, or secrets.`,
-        "Use one tool for every Mesa read or write. Never claim an action succeeded without using its tool.",
+        "Analyze the latest user message in conversation context. Emit one function call for every distinct requested Mesa operation, up to five calls.",
+        "A request for two tasks must produce two create_task calls. Never combine separate tasks, shopping items, or events into one title.",
+        "For task titles, preserve only the actionable title. Remove wrappers such as 'add the following tasks' and remove due-date or assignment phrases after placing those values in their fields.",
         "For shopping phrases such as buy, shopping, groceries, or we need, create the task in things_to_buy.",
-        "When the user says me, use assigneeName 'me'. Leave a task unassigned only when they do not request an assignee.",
-        "Resolve relative dates from the supplied current date. If a required date or identity is genuinely ambiguous, ask one short question instead of guessing.",
-        "Handle one Mesa action per message. If the user asks for several, ask them which to do first.",
-        "Keep text replies friendly and under 900 characters.",
+        "Default new tasks to assigneeName 'me' unless the user explicitly requests another family member or says to leave the task open or unassigned.",
+        "Resolve relative dates from the supplied current date. For an exact date query, use dateFrom and dateTo with the same date instead of requesting the full week.",
+        "If a required date or identity is genuinely ambiguous, emit no function calls and ask one short clarification question.",
+        "For conversation that needs no Mesa data or action, emit no function calls and respond naturally.",
       ].join(" "),
       input,
       tools: whatsappTools,
       tool_choice: "auto",
-      parallel_tool_calls: false,
-      max_output_tokens: 350,
+      parallel_tool_calls: true,
+      max_output_tokens: 900,
       text: { verbosity: "low" },
     },
-    10_000,
+    7_000,
   );
-  const call = response.output.find((item) => item.type === "function_call");
-  if (call) return executeWhatsappTool(identity, call);
-  return responseText(response) || "I’m not sure how to help with that yet.";
+  const calls = interpretation.output.filter((item) => item.type === "function_call");
+  if (!calls.length)
+    return responseText(interpretation) || "I’m not sure how to help with that yet.";
+  if (calls.length > 5) return "I can handle up to five Mesa actions in one message.";
+
+  const results: Array<{ action: string; result: string }> = [];
+  for (const call of calls) {
+    try {
+      results.push({
+        action: call.name ?? "unknown",
+        result: await executeWhatsappTool(identity, call),
+      });
+    } catch (error) {
+      console.error("WhatsApp planned action failed", error);
+      results.push({
+        action: call.name ?? "unknown",
+        result: "Mesa could not complete this action.",
+      });
+    }
+  }
+
+  const fallback = results.map(({ result }) => `• ${result}`).join("\n");
+  try {
+    const conversation = await createOpenAIResponse(
+      {
+        model: CONVERSATION_MODEL,
+        store: false,
+        reasoning: { effort: "none" },
+        safety_identifier: safetyId,
+        instructions: [
+          "You are Mesa, a warm and direct WhatsApp family assistant.",
+          "Write a concise confirmation grounded only in the supplied action results.",
+          "For multiple results, use a short numbered or bulleted list so every completed or failed action is explicit.",
+          "Preserve task titles, dates, assignees, and failures. Never claim an action succeeded when its result says it failed.",
+          "Do not mention tools, models, parsing, JSON, or internal processing. Stay under 900 characters.",
+        ].join(" "),
+        input: JSON.stringify({
+          request: latestRequest,
+          results,
+        }),
+        max_output_tokens: 400,
+        text: { verbosity: "low" },
+      },
+      5_000,
+    );
+    return responseText(conversation) || fallback;
+  } catch (error) {
+    console.error("WhatsApp conversational response failed", error);
+    return fallback;
+  }
 }
 
 Deno.serve(async (request) => {
@@ -810,6 +897,7 @@ Deno.serve(async (request) => {
       "• buy Milk",
       "• add Sign school form tomorrow",
       "• done Milk",
+      "You can add up to five tasks or events in one message.",
       "You can also say: “Add football Friday at 17:00” or “Assign the school form to Maria.”",
     ].join("\n");
   } else if (normalized === "today") {
@@ -822,9 +910,9 @@ Deno.serve(async (request) => {
     reply = await taskList(identity, "open", "things_to_buy");
   } else if (normalized === "my tasks") {
     reply = await taskList(identity, "mine", null);
-  } else if (/^buy\s+/i.test(body)) {
+  } else if (/^buy\s+/i.test(body) && !likelyCompoundRequest(body)) {
     reply = await addTask(identity, body.replace(/^buy\s+/i, ""), "shopping");
-  } else if (/^add\s+/i.test(body)) {
+  } else if (/^add\s+/i.test(body) && !likelyCompoundRequest(body)) {
     const taskText = body.replace(/^add\s+/i, "");
     const isShoppingItem = /^buy\s+/i.test(taskText);
     reply = await addTask(identity, taskText, isShoppingItem ? "shopping" : "tasks");
