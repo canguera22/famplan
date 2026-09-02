@@ -12,6 +12,7 @@ import { AppShell } from "@/components/AppShell";
 import { Button, Card } from "@/components/ui-kit";
 import { RECIPE_MAP } from "@/data/recipes";
 import type { FamilyTask } from "@/domain/family";
+import { expandCalendarEvents } from "@/lib/calendar-occurrences";
 import { personFor, useFamilyPlanner } from "@/lib/family-store";
 import { useAuth } from "@/lib/auth";
 import { useStore } from "@/lib/store";
@@ -44,9 +45,11 @@ function HomePage() {
   const meals = useStore();
   const now = new Date();
   const today = dateKey(now);
-  const todayEvents = planner.events
-    .filter((event) => dateKey(event.startsAt) === today)
-    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const tomorrowStart = new Date(todayStart);
+  tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+  const todayEvents = expandCalendarEvents(planner.events, todayStart, tomorrowStart);
   const dueToday = planner.tasks.filter(
     (task) => task.status !== "done" && task.dueAt && dateKey(task.dueAt) === today,
   );
@@ -376,7 +379,7 @@ function UpcomingAgenda() {
   const end = new Date(start);
   end.setDate(end.getDate() + 7);
   const upcoming = [
-    ...planner.events.map((event) => ({
+    ...expandCalendarEvents(planner.events, start, end).map((event) => ({
       id: `event-${event.id}`,
       title: event.title,
       at: event.startsAt,

@@ -227,42 +227,8 @@ async function pairPhone(
 }
 
 async function todaySummary(identity: Record<string, string>): Promise<string> {
-  const now = new Date();
-  const today = madridDateKey(now);
-  const lower = new Date(now.getTime() - 36 * 60 * 60 * 1000).toISOString();
-  const upper = new Date(now.getTime() + 36 * 60 * 60 * 1000).toISOString();
-  const [eventsResult, tasksResult] = await Promise.all([
-    supabase
-      .from("calendar_events")
-      .select("title, starts_at, all_day")
-      .eq("family_id", identity.family_id)
-      .gte("starts_at", lower)
-      .lte("starts_at", upper)
-      .order("starts_at"),
-    supabase
-      .from("list_cards")
-      .select("title, due_at, status")
-      .eq("family_id", identity.family_id)
-      .neq("status", "done")
-      .not("due_at", "is", null)
-      .gte("due_at", lower)
-      .lte("due_at", upper)
-      .order("due_at"),
-  ]);
-  const events = (eventsResult.data ?? []).filter(
-    (event) => madridDateKey(event.starts_at) === today,
-  );
-  const tasks = (tasksResult.data ?? []).filter(
-    (task) => task.due_at && madridDateKey(task.due_at) === today,
-  );
-  if (!events.length && !tasks.length) return "Today is clear—nothing scheduled and no tasks due.";
-
-  const lines = ["Today in Mesa:"];
-  for (const event of events) {
-    lines.push(`• ${event.all_day ? "All day" : madridTime(event.starts_at)} — ${event.title}`);
-  }
-  for (const task of tasks) lines.push(`• Task — ${task.title}`);
-  return lines.join("\n");
+  const today = madridDateKey(new Date());
+  return agendaForDates(identity, today, today, "Today");
 }
 
 async function addTask(
@@ -399,6 +365,97 @@ async function agendaSummary(
   return agendaForDates(identity, startKey, endKey, label);
 }
 
+type AgendaEventRow = {
+  title: string;
+  starts_at: string;
+  ends_at: string;
+  all_day: boolean;
+  assignee_id: string | null;
+  recurrence_rule: string | null;
+};
+
+function madridClock(value: string): [number, number] {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: TIME_ZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(new Date(value))
+      .map((part) => [part.type, part.value]),
+  );
+  return [Number(parts.hour), Number(parts.minute)];
+}
+
+function nextRecurringDate(
+  currentKey: string,
+  frequency: string,
+  baseDay: number,
+  baseMonth: number,
+): string {
+  if (frequency === "DAILY") return addDays(currentKey, 1);
+  if (frequency === "WEEKLY") return addDays(currentKey, 7);
+  const [year, month] = currentKey.split("-").map(Number);
+  if (frequency === "MONTHLY") {
+    const target = new Date(Date.UTC(year!, month!, 1));
+    const lastDay = new Date(
+      Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0),
+    ).getUTCDate();
+    return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-${String(Math.min(baseDay, lastDay)).padStart(2, "0")}`;
+  }
+  const nextYear = year! + 1;
+  const lastDay = new Date(Date.UTC(nextYear, baseMonth, 0)).getUTCDate();
+  return `${nextYear}-${String(baseMonth).padStart(2, "0")}-${String(Math.min(baseDay, lastDay)).padStart(2, "0")}`;
+}
+
+function expandEventRows(
+  rows: AgendaEventRow[],
+  startKey: string,
+  endKey: string,
+): AgendaEventRow[] {
+  const rangeStart = new Date(zonedDateAt(startKey, 0));
+  const rangeEnd = new Date(zonedDateAt(addDays(endKey, 1), 0));
+  const output: AgendaEventRow[] = [];
+
+  for (const row of rows) {
+    const frequency = row.recurrence_rule?.match(/FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)/)?.[1];
+    const originalKey = madridDateKey(row.starts_at);
+    const [, baseMonth, baseDay] = originalKey.split("-").map(Number);
+    const [hour, minute] = madridClock(row.starts_at);
+    const duration = new Date(row.ends_at).getTime() - new Date(row.starts_at).getTime();
+    const allDaySpan = Math.max(
+      1,
+      Math.round(
+        (Date.parse(`${madridDateKey(row.ends_at)}T00:00:00Z`) -
+          Date.parse(`${originalKey}T00:00:00Z`)) /
+          86_400_000,
+      ),
+    );
+    let occurrenceKey = originalKey;
+    let guard = 0;
+
+    while (guard < 10_000) {
+      const occurrenceStart = new Date(zonedDateAt(occurrenceKey, hour, minute));
+      const occurrenceEnd = row.all_day
+        ? new Date(zonedDateAt(addDays(occurrenceKey, allDaySpan), 0))
+        : new Date(occurrenceStart.getTime() + duration);
+      if (occurrenceStart < rangeEnd && occurrenceEnd > rangeStart) {
+        output.push({
+          ...row,
+          starts_at: occurrenceStart.toISOString(),
+          ends_at: occurrenceEnd.toISOString(),
+        });
+      }
+      if (!frequency || occurrenceStart >= rangeEnd) break;
+      occurrenceKey = nextRecurringDate(occurrenceKey, frequency, baseDay!, baseMonth!);
+      guard += 1;
+    }
+  }
+
+  return output.sort((left, right) => left.starts_at.localeCompare(right.starts_at));
+}
+
 async function agendaForDates(
   identity: Record<string, string>,
   startKey: string,
@@ -411,15 +468,24 @@ async function agendaForDates(
   if (span < 0 || span > 14) return "I can show an agenda range of up to 15 days.";
   const start = zonedDateAt(startKey, 0);
   const end = zonedDateAt(addDays(endKey, 1), 0);
-  const [eventsResult, tasksResult] = await Promise.all([
+  const [eventsResult, recurringEventsResult, tasksResult] = await Promise.all([
     supabase
       .from("calendar_events")
-      .select("title, starts_at, all_day, assignee_id")
+      .select("title, starts_at, ends_at, all_day, assignee_id, recurrence_rule")
       .eq("family_id", identity.family_id)
-      .gte("starts_at", start)
+      .is("recurrence_rule", null)
       .lt("starts_at", end)
+      .gt("ends_at", start)
       .order("starts_at")
-      .limit(30),
+      .limit(100),
+    supabase
+      .from("calendar_events")
+      .select("title, starts_at, ends_at, all_day, assignee_id, recurrence_rule")
+      .eq("family_id", identity.family_id)
+      .not("recurrence_rule", "is", null)
+      .lt("starts_at", end)
+      .order("starts_at", { ascending: false })
+      .limit(100),
     supabase
       .from("list_cards")
       .select("title, due_at, assignee_id")
@@ -431,7 +497,11 @@ async function agendaForDates(
       .order("due_at")
       .limit(30),
   ]);
-  const events = eventsResult.data ?? [];
+  const events = expandEventRows(
+    [...(eventsResult.data ?? []), ...(recurringEventsResult.data ?? [])],
+    startKey,
+    endKey,
+  ).slice(0, 30);
   const tasks = tasksResult.data ?? [];
   if (!events.length && !tasks.length) return `${label} is clear.`;
   const showDates = startKey !== endKey;
@@ -565,30 +635,34 @@ async function createEvent(
   identity: Record<string, string>,
   args: {
     title: string;
-    date: string;
+    startDate: string;
+    endDate: string | null;
     startTime: string | null;
-    endTime: string | null;
+    recurrence: "none" | "daily" | "weekly" | "monthly" | "yearly";
     assigneeName: string | null;
   },
 ): Promise<string> {
   if (!args.title.trim()) return "An event title is required.";
   if (args.title.trim().length > 200) return "That event title is too long.";
-  if (!validDateKey(args.date)) return "I need a valid event date.";
-  if (!validClock(args.startTime) || !validClock(args.endTime))
-    return "Use a valid 24-hour event time.";
-  if (!args.startTime && args.endTime) return "An end time needs a start time too.";
+  if (!validDateKey(args.startDate) || (args.endDate && !validDateKey(args.endDate)))
+    return "I need a valid event date or date range.";
+  if (args.endDate && args.endDate < args.startDate)
+    return "The event end date must be on or after its start date.";
+  if (!validClock(args.startTime)) return "Use a valid 24-hour event start time.";
   const createdBy = await creatorId(identity);
   if (!createdBy) return "Mesa could not identify who is creating that event.";
   const assigneeId = await personIdFor(identity, args.assigneeName);
   if (args.assigneeName && !assigneeId)
     return `I couldn’t find a family member named “${args.assigneeName}”.`;
   const timeParts = (args.startTime ?? "00:00").split(":").map(Number);
-  const endParts = args.endTime?.split(":").map(Number);
-  const startsAt = zonedDateAt(args.date, timeParts[0] ?? 0, timeParts[1] ?? 0);
+  const startsAt = zonedDateAt(args.startDate, timeParts[0] ?? 0, timeParts[1] ?? 0);
+  const finalDate = args.endDate ?? args.startDate;
   let endsAt: string;
-  if (!args.startTime) endsAt = zonedDateAt(addDays(args.date, 1), 0);
-  else if (endParts) endsAt = zonedDateAt(args.date, endParts[0] ?? 0, endParts[1] ?? 0);
-  else endsAt = new Date(new Date(startsAt).getTime() + 60 * 60 * 1000).toISOString();
+  if (!args.startTime) endsAt = zonedDateAt(addDays(finalDate, 1), 0);
+  else {
+    const finalStart = zonedDateAt(finalDate, timeParts[0] ?? 0, timeParts[1] ?? 0);
+    endsAt = new Date(new Date(finalStart).getTime() + 60 * 60 * 1000).toISOString();
+  }
   if (new Date(endsAt) <= new Date(startsAt))
     return "The event end time must be after its start time.";
   const { error } = await supabase.from("calendar_events").insert({
@@ -598,6 +672,7 @@ async function createEvent(
     ends_at: endsAt,
     all_day: !args.startTime,
     assignee_id: assigneeId,
+    recurrence_rule: args.recurrence === "none" ? null : `FREQ=${args.recurrence.toUpperCase()}`,
     source_type: "manual",
     created_by: createdBy,
   });
@@ -605,7 +680,9 @@ async function createEvent(
     console.error("AI calendar event insert failed", error);
     return "Mesa could not add that calendar event.";
   }
-  return `Added “${args.title.trim()}” to the family calendar on ${args.date}${args.startTime ? ` at ${args.startTime}` : ""}.`;
+  const dateLabel = args.endDate ? `${args.startDate} through ${args.endDate}` : args.startDate;
+  const repeatLabel = args.recurrence === "none" ? "" : `, repeating ${args.recurrence}`;
+  return `Added “${args.title.trim()}” to the family calendar for ${dateLabel}${args.startTime ? ` at ${args.startTime}` : ""}${repeatLabel}.`;
 }
 
 const whatsappTools = [
@@ -690,18 +767,26 @@ const whatsappTools = [
   {
     type: "function",
     name: "create_event",
-    description: "Create a family calendar event. Use null times for an all-day event.",
+    description:
+      "Create a single or recurring family calendar event. Date ranges are inclusive. Use null startTime for an all-day event.",
     strict: true,
     parameters: {
       type: "object",
       properties: {
         title: { type: "string" },
-        date: { type: "string", description: "YYYY-MM-DD" },
+        startDate: { type: "string", description: "YYYY-MM-DD" },
+        endDate: {
+          type: ["string", "null"],
+          description: "Inclusive YYYY-MM-DD end date for a multi-day event, or null",
+        },
         startTime: { type: ["string", "null"], description: "24-hour HH:MM, or null" },
-        endTime: { type: ["string", "null"], description: "24-hour HH:MM, or null" },
+        recurrence: {
+          type: "string",
+          enum: ["none", "daily", "weekly", "monthly", "yearly"],
+        },
         assigneeName: { type: ["string", "null"] },
       },
-      required: ["title", "date", "startTime", "endTime", "assigneeName"],
+      required: ["title", "startDate", "endDate", "startTime", "recurrence", "assigneeName"],
       additionalProperties: false,
     },
   },
@@ -773,6 +858,7 @@ async function aiWhatsappReply(identity: Record<string, string>): Promise<string
         "For shopping phrases such as buy, shopping, groceries, or we need, create the task in things_to_buy.",
         "Default new tasks to assigneeName 'me' unless the user explicitly requests another family member or says to leave the task open or unassigned.",
         "Resolve relative dates from the supplied current date. For an exact date query, use dateFrom and dateTo with the same date instead of requesting the full week.",
+        "For events, never invent or request an end time. A date range is one create_event call with startDate and inclusive endDate. If no clock time is stated, use null startTime so the event is all day. Capture phrases like every day, week, month, or year in recurrence; otherwise use none.",
         "If a required date or identity is genuinely ambiguous, emit no function calls and ask one short clarification question.",
         "For conversation that needs no Mesa data or action, emit no function calls and respond naturally.",
       ].join(" "),

@@ -1,6 +1,14 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { CalendarCheck2, ChevronLeft, ChevronRight, Clock3, ListTodo } from "lucide-react";
+import {
+  CalendarCheck2,
+  CalendarRange,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  ListTodo,
+  Repeat2,
+} from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { Button, Card } from "@/components/ui-kit";
 import {
@@ -12,6 +20,13 @@ import {
 } from "@/components/ui/dialog";
 import type { FamilyPerson } from "@/domain/family";
 import { useAuth } from "@/lib/auth";
+import {
+  eventDisplayEnd,
+  eventOverlapsDay,
+  eventSpansMultipleDays,
+  expandCalendarEvents,
+  recurrenceLabel,
+} from "@/lib/calendar-occurrences";
 import { personFor, useFamilyPlanner } from "@/lib/family-store";
 import { cn } from "@/lib/utils";
 
@@ -28,6 +43,7 @@ interface CalendarDisplayItem {
   endsAt: string | null;
   allDay: boolean;
   assigneeId: string | null;
+  recurrenceRule: string | null;
   kind: "event" | "task";
   done: boolean;
 }
@@ -62,9 +78,11 @@ function CalendarPage() {
   );
   const today = dayKey(new Date());
 
-  const items = useMemo<CalendarDisplayItem[]>(
-    () => [
-      ...planner.events.map((event) => ({
+  const items = useMemo<CalendarDisplayItem[]>(() => {
+    const rangeEnd = new Date(days[6]);
+    rangeEnd.setDate(rangeEnd.getDate() + 1);
+    return [
+      ...expandCalendarEvents(planner.events, days[0], rangeEnd).map((event) => ({
         id: event.id,
         title: event.title,
         description: event.description,
@@ -72,6 +90,7 @@ function CalendarPage() {
         endsAt: event.endsAt,
         allDay: event.allDay,
         assigneeId: event.assigneeId,
+        recurrenceRule: event.recurrenceRule,
         kind: "event" as const,
         done: false,
       })),
@@ -85,12 +104,19 @@ function CalendarPage() {
           endsAt: null,
           allDay: task.allDay,
           assigneeId: task.assigneeId,
+          recurrenceRule: null,
           kind: "task" as const,
           done: task.status === "done",
         })),
-    ],
-    [planner.events, planner.tasks],
-  );
+    ];
+  }, [days, planner.events, planner.tasks]);
+
+  const itemsForDay = (date: Date) =>
+    items
+      .filter((item) =>
+        item.kind === "event" ? eventOverlapsDay(item, date) : dayKey(item.at) === dayKey(date),
+      )
+      .sort((a, b) => a.at.localeCompare(b.at));
 
   const shiftWeek = (amount: number) =>
     setAnchor((current) => {
@@ -163,9 +189,7 @@ function CalendarPage() {
 
       <div className="hidden overflow-hidden rounded-3xl border border-border bg-card md:grid md:grid-cols-7">
         {days.map((date) => {
-          const dateItems = items
-            .filter((item) => dayKey(item.at) === dayKey(date))
-            .sort((a, b) => a.at.localeCompare(b.at));
+          const dateItems = itemsForDay(date);
           const isToday = dayKey(date) === today;
           return (
             <section
@@ -198,7 +222,7 @@ function CalendarPage() {
               <div className="space-y-2 p-2">
                 {dateItems.map((item) => (
                   <CalendarItem
-                    key={`${item.kind}_${item.id}`}
+                    key={`${item.kind}_${item.id}_${item.at}`}
                     item={item}
                     person={personFor(planner.people, item.assigneeId)}
                     isMine={item.assigneeId === currentPerson?.id}
@@ -217,9 +241,7 @@ function CalendarPage() {
 
       <div className="space-y-4 md:hidden">
         {days.map((date) => {
-          const dateItems = items
-            .filter((item) => dayKey(item.at) === dayKey(date))
-            .sort((a, b) => a.at.localeCompare(b.at));
+          const dateItems = itemsForDay(date);
           const isToday = dayKey(date) === today;
           return (
             <section key={dayKey(date)} aria-labelledby={`day-${dayKey(date)}`}>
@@ -244,7 +266,7 @@ function CalendarPage() {
                   <div className="divide-y divide-border">
                     {dateItems.map((item) => (
                       <CalendarItem
-                        key={`${item.kind}_${item.id}`}
+                        key={`${item.kind}_${item.id}_${item.at}`}
                         item={item}
                         person={personFor(planner.people, item.assigneeId)}
                         isMine={item.assigneeId === currentPerson?.id}
@@ -321,6 +343,8 @@ function CalendarItem({
     : new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(
         new Date(item.at),
       );
+  const spansDays = item.kind === "event" && eventSpansMultipleDays(item);
+  const repeats = recurrenceLabel(item.recurrenceRule);
   return (
     <button
       type="button"
@@ -350,6 +374,8 @@ function CalendarItem({
             <CalendarCheck2 className="h-3.5 w-3.5" />
           )}
           <span>{item.kind === "task" ? "TASK" : time}</span>
+          {spansDays ? <CalendarRange className="ml-1 h-3.5 w-3.5" aria-label="Multi-day" /> : null}
+          {repeats ? <Repeat2 className="h-3.5 w-3.5" aria-label={repeats} /> : null}
         </div>
         <p
           className={cn(
@@ -418,6 +444,15 @@ function CalendarItemDetail({
     day: "numeric",
     year: "numeric",
   }).format(date);
+  const endDate = item.kind === "event" ? eventDisplayEnd(item) : date;
+  const spansDays = item.kind === "event" && eventSpansMultipleDays(item);
+  const endDateLabel = new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(endDate);
+  const repeats = recurrenceLabel(item.recurrenceRule);
   const timeLabel = item.allDay
     ? "All day"
     : new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(date);
@@ -435,7 +470,9 @@ function CalendarItemDetail({
             {item.kind}
           </div>
           <DialogTitle className="pt-2 text-2xl leading-tight">{item.title}</DialogTitle>
-          <DialogDescription>{dateLabel}</DialogDescription>
+          <DialogDescription>
+            {spansDays ? `${dateLabel} – ${endDateLabel}` : dateLabel}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
@@ -444,6 +481,14 @@ function CalendarItemDetail({
               <p className="text-xs font-semibold text-muted-foreground">When</p>
               <p className="mt-1 text-sm font-bold">{timeLabel}</p>
             </div>
+            {repeats ? (
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground">Repeats</p>
+                <p className="mt-1 flex items-center gap-1.5 text-sm font-bold">
+                  <Repeat2 className="h-4 w-4" /> {repeats}
+                </p>
+              </div>
+            ) : null}
             <div>
               <p className="text-xs font-semibold text-muted-foreground">Assigned to</p>
               <span

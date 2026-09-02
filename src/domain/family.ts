@@ -38,6 +38,7 @@ export interface FamilyEvent {
   endsAt: string;
   allDay: boolean;
   assigneeId: string | null;
+  recurrenceRule: string | null;
   source: "manual" | "meal";
 }
 
@@ -59,4 +60,5 @@ export interface NewEventInput {
   endsAt: string;
   allDay?: boolean;
   assigneeId?: string | null;
+  recurrenceRule?: string | null;
 }

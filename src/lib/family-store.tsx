@@ -98,6 +98,7 @@ function eventFromRow(row: EventRow): FamilyEvent {
     endsAt: row.ends_at,
     allDay: row.all_day,
     assigneeId: row.assignee_id,
+    recurrenceRule: row.recurrence_rule,
     source: row.source_type === "meal" ? "meal" : "manual",
   };
 }
@@ -313,6 +314,7 @@ export function FamilyPlannerProvider({ children }: { children: ReactNode }) {
           endsAt: input.endsAt,
           allDay: input.allDay ?? false,
           assigneeId: input.assigneeId ?? null,
+          recurrenceRule: input.recurrenceRule ?? null,
           source: "manual",
         };
         setState((current) => ({ ...current, events: [...current.events, event] }));
@@ -327,6 +329,7 @@ export function FamilyPlannerProvider({ children }: { children: ReactNode }) {
             ends_at: event.endsAt,
             all_day: event.allDay,
             assignee_id: event.assigneeId,
+            recurrence_rule: event.recurrenceRule,
             source_type: "manual",
             created_by: user.id,
           })
@@ -358,6 +361,7 @@ export function FamilyPlannerProvider({ children }: { children: ReactNode }) {
             ends_at: next.endsAt,
             all_day: next.allDay,
             assignee_id: next.assigneeId,
+            recurrence_rule: next.recurrenceRule,
             source_type: next.source,
           })
           .eq("id", eventId)
