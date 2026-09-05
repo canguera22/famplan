@@ -98,6 +98,10 @@ function likelyCompoundRequest(value: string): boolean {
   );
 }
 
+function likelyNamedListRequest(value: string): boolean {
+  return /\b(?:to|on|in)\s+(?:the\s+|my\s+)?[^\n,.;]+$/iu.test(value);
+}
+
 function zonedDateAt(dateKey: string, hour: number, minute = 0): string {
   const [year, month, day] = dateKey.split("-").map(Number);
   const desired = Date.UTC(year!, month! - 1, day!, hour, minute);
@@ -522,39 +526,142 @@ async function agendaForDates(
 async function taskList(
   identity: Record<string, string>,
   scope: "mine" | "open" | "all",
-  listName: "family_tasks" | "things_to_buy" | null,
+  listName: string | null,
 ): Promise<string> {
-  const { data: lists } = await supabase
-    .from("lists")
-    .select("id, name")
-    .eq("family_id", identity.family_id)
-    .is("archived_at", null)
-    .order("position");
-  const wanted =
-    listName === "things_to_buy"
-      ? lists?.find((list) => list.name.toLowerCase() === "things to buy")
-      : listName === "family_tasks"
-        ? lists?.find((list) => list.name.toLowerCase() !== "things to buy")
-        : null;
+  const lists = await activeLists(identity.family_id);
+  const resolution = listName ? resolveList(lists, listName) : null;
+  if (resolution?.error) return resolution.error;
+  const wanted = resolution?.list ?? null;
   let query = supabase
     .from("list_cards")
     .select("title, status, due_at, assignee_id, list_id")
     .eq("family_id", identity.family_id)
     .order("due_at", { ascending: true, nullsFirst: false })
-    .limit(30);
+    .order("created_at", { ascending: true })
+    .limit(50);
   if (scope !== "all") query = query.neq("status", "done");
   if (scope === "mine") query = query.eq("assignee_id", identity.person_id);
   if (wanted) query = query.eq("list_id", wanted.id);
   const { data: tasks, error } = await query;
   if (error) return "I couldn’t read the family lists just now.";
-  if (!tasks?.length) return "That list is clear.";
-  const listMap = new Map((lists ?? []).map((list) => [list.id, list.name]));
-  return tasks
-    .map((task, index) => {
+  if (!tasks?.length) return wanted ? `${wanted.name} is clear.` : "Your lists are clear.";
+  const listMap = new Map(lists.map((list) => [list.id, list.name]));
+  const heading = wanted ? `${wanted.name}:` : "Open items across your lists:";
+  return [
+    heading,
+    ...tasks.map((task, index) => {
       const due = task.due_at ? ` · due ${madridDateKey(task.due_at)}` : "";
-      return `${index + 1}. ${task.title} · ${task.status} · ${listMap.get(task.list_id) ?? "List"}${due}`;
-    })
-    .join("\n");
+      const marker = task.status === "done" ? "✓" : "☐";
+      const listLabel = wanted ? "" : ` · ${listMap.get(task.list_id) ?? "List"}`;
+      return `${index + 1}. ${marker} ${task.title}${listLabel}${due}`;
+    }),
+  ].join("\n");
+}
+
+type ActiveList = { id: string; name: string; description: string; position: number };
+
+async function activeLists(familyId: string): Promise<ActiveList[]> {
+  const { data, error } = await supabase
+    .from("lists")
+    .select("id, name, description, position")
+    .eq("family_id", familyId)
+    .is("archived_at", null)
+    .order("position");
+  if (error) throw error;
+  return data ?? [];
+}
+
+function comparableListName(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\blist\b/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function resolveList(
+  lists: ActiveList[],
+  requestedName: string,
+): { list: ActiveList | null; error: string | null } {
+  const requested = comparableListName(requestedName);
+  if (!requested) {
+    return { list: null, error: "Tell me the exact name of the list." };
+  }
+  const alias =
+    requested === "family tasks"
+      ? lists.find((list) => comparableListName(list.name) !== "things to buy")
+      : requested === "things to buy"
+        ? lists.find((list) => comparableListName(list.name) === "things to buy")
+        : null;
+  if (alias) return { list: alias, error: null };
+  const exact = lists.find((list) => comparableListName(list.name) === requested);
+  if (exact) return { list: exact, error: null };
+  const partial = lists.filter((list) => {
+    const candidate = comparableListName(list.name);
+    return candidate.includes(requested) || requested.includes(candidate);
+  });
+  if (partial.length === 1) return { list: partial[0]!, error: null };
+  if (partial.length > 1) {
+    return {
+      list: null,
+      error: `I found more than one matching list: ${partial.map((list) => list.name).join(", ")}. Use the exact name.`,
+    };
+  }
+  return {
+    list: null,
+    error: `I couldn’t find a list named “${requestedName.trim()}”. You can say “create a ${requestedName.trim()} list”.`,
+  };
+}
+
+async function createList(
+  identity: Record<string, string>,
+  args: { name: string; description: string | null },
+): Promise<string> {
+  const name = args.name.trim().replace(/\s+/g, " ");
+  if (!name) return "Tell me what to call the new list.";
+  if (name.length > 60) return "Keep the list name under 60 characters.";
+  const lists = await activeLists(identity.family_id);
+  const duplicate = lists.find(
+    (list) => comparableListName(list.name) === comparableListName(name),
+  );
+  if (duplicate) return `The ${duplicate.name} list already exists.`;
+  const createdBy = await creatorId(identity);
+  if (!createdBy) return "Mesa could not identify who is creating that list.";
+  const colors = ["green", "blue", "amber"];
+  const position = lists.reduce((highest, list) => Math.max(highest, list.position), -1) + 1;
+  const { error } = await supabase.from("lists").insert({
+    family_id: identity.family_id,
+    name,
+    description: args.description?.trim().slice(0, 160) ?? "",
+    color: colors[lists.length % colors.length],
+    position,
+    created_by: createdBy,
+  });
+  if (error) {
+    console.error("WhatsApp list insert failed", error);
+    return "Mesa could not create that list.";
+  }
+  return `Created the ${name} list. You can add items to it anytime.`;
+}
+
+async function clearList(identity: Record<string, string>, listName: string): Promise<string> {
+  const resolution = resolveList(await activeLists(identity.family_id), listName);
+  if (resolution.error || !resolution.list)
+    return resolution.error ?? "Mesa could not find that list.";
+  const { count, error } = await supabase
+    .from("list_cards")
+    .delete({ count: "exact" })
+    .eq("family_id", identity.family_id)
+    .eq("list_id", resolution.list.id);
+  if (error) {
+    console.error("WhatsApp list clear failed", error);
+    return `Mesa could not clear ${resolution.list.name}.`;
+  }
+  return count
+    ? `Cleared ${count} ${count === 1 ? "item" : "items"} from ${resolution.list.name}. The list is ready to reuse.`
+    : `${resolution.list.name} is already clear.`;
 }
 
 async function createTaskFromTool(
@@ -563,24 +670,17 @@ async function createTaskFromTool(
     title: string;
     dueDate: string | null;
     assigneeName: string | null;
-    listName: "family_tasks" | "things_to_buy";
+    listName: string;
   },
 ): Promise<string> {
   const title = args.title.trim();
   if (!title) return "A task title is required.";
   if (title.length > 200) return "That task title is too long.";
   if (args.dueDate && !validDateKey(args.dueDate)) return "I need a valid task date.";
-  const { data: lists } = await supabase
-    .from("lists")
-    .select("id, name")
-    .eq("family_id", identity.family_id)
-    .is("archived_at", null)
-    .order("position");
-  const list =
-    args.listName === "things_to_buy"
-      ? lists?.find((item) => item.name.toLowerCase() === "things to buy")
-      : lists?.find((item) => item.name.toLowerCase() !== "things to buy");
-  if (!list) return "Mesa could not find that family list.";
+  const resolution = resolveList(await activeLists(identity.family_id), args.listName);
+  if (resolution.error || !resolution.list)
+    return resolution.error ?? "Mesa could not find that family list.";
+  const list = resolution.list;
   const assigneeId = await personIdFor(identity, args.assigneeName);
   if (args.assigneeName && !assigneeId)
     return `I couldn’t find a family member named “${args.assigneeName}”.`;
@@ -707,13 +807,16 @@ const whatsappTools = [
     type: "function",
     name: "list_tasks",
     description:
-      "List Mesa tasks or shopping items. Use mine for tasks assigned to this WhatsApp user.",
+      "Read items from any named Mesa list, or across lists when listName is null. Use mine for items assigned to this WhatsApp user.",
     strict: true,
     parameters: {
       type: "object",
       properties: {
         scope: { type: "string", enum: ["mine", "open", "all"] },
-        listName: { type: ["string", "null"], enum: ["family_tasks", "things_to_buy", null] },
+        listName: {
+          type: ["string", "null"],
+          description: "The user's list name, such as Things to buy or Costco, or null",
+        },
       },
       required: ["scope", "listName"],
       additionalProperties: false,
@@ -723,7 +826,7 @@ const whatsappTools = [
     type: "function",
     name: "create_task",
     description:
-      "Create a family task or a Things to buy item. Shopping requests always use things_to_buy.",
+      "Create one item on a named Mesa list. Use the exact list name from the user when supplied.",
     strict: true,
     parameters: {
       type: "object",
@@ -734,9 +837,49 @@ const whatsappTools = [
           type: ["string", "null"],
           description: "Family member name, 'me', or null for unassigned",
         },
-        listName: { type: "string", enum: ["family_tasks", "things_to_buy"] },
+        listName: {
+          type: "string",
+          description:
+            "List name. Default to Family tasks, or Things to buy for unspecified shopping requests.",
+        },
       },
       required: ["title", "dueDate", "assigneeName", "listName"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "create_list",
+    description:
+      "Create a new reusable family list. Do not call this when the user only wants an item added.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "The new list name without the word list when possible",
+        },
+        description: {
+          type: ["string", "null"],
+          description: "Optional short description, or null",
+        },
+      },
+      required: ["name", "description"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "clear_list",
+    description: "Remove every item from one named list while preserving the reusable list itself.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        listName: { type: "string", description: "Exact list name to empty" },
+      },
+      required: ["listName"],
       additionalProperties: false,
     },
   },
@@ -804,13 +947,13 @@ async function executeWhatsappTool(
       return "Tell me which date or date range you want to see.";
     }
     case "list_tasks":
-      return taskList(
-        identity,
-        args.scope as "mine" | "open" | "all",
-        args.listName as "family_tasks" | "things_to_buy" | null,
-      );
+      return taskList(identity, args.scope as "mine" | "open" | "all", args.listName);
     case "create_task":
       return createTaskFromTool(identity, args as Parameters<typeof createTaskFromTool>[1]);
+    case "create_list":
+      return createList(identity, args as Parameters<typeof createList>[1]);
+    case "clear_list":
+      return clearList(identity, String(args.listName ?? ""));
     case "complete_task":
       return completeTask(identity, String(args.query ?? ""));
     case "assign_task":
@@ -855,7 +998,10 @@ async function aiWhatsappReply(identity: Record<string, string>): Promise<string
         "Analyze the latest user message in conversation context. Emit one function call for every distinct requested Mesa operation, up to five calls.",
         "A request for two tasks must produce two create_task calls. Never combine separate tasks, shopping items, or events into one title.",
         "For task titles, preserve only the actionable title. Remove wrappers such as 'add the following tasks' and remove due-date or assignment phrases after placing those values in their fields.",
-        "For shopping phrases such as buy, shopping, groceries, or we need, create the task in things_to_buy.",
+        "Users can create reusable lists, add items to any list by name, read a named list, and clear a named list. Never interpret 'create a list named X' as a task.",
+        "When the user names a list, pass that human-readable name exactly as listName. For an unspecified shopping request, use Things to buy. For an unspecified non-shopping task, use Family tasks.",
+        "For phrases such as 'show my Costco list' or 'what is on Costco', call list_tasks with listName Costco and scope open. Use scope all only when the user explicitly asks to include completed items.",
+        "Only call clear_list when the user explicitly asks to clear or empty a specific named list. Clearing removes its items but preserves the reusable list.",
         "Default new tasks to assigneeName 'me' unless the user explicitly requests another family member or says to leave the task open or unassigned.",
         "Resolve relative dates from the supplied current date. For an exact date query, use dateFrom and dateTo with the same date instead of requesting the full week.",
         "For events, never invent or request an end time. A date range is one create_event call with startDate and inclusive endDate. If no clock time is stated, use null startTime so the event is all day. Capture phrases like every day, week, month, or year in recurrence; otherwise use none.",
@@ -983,6 +1129,10 @@ Deno.serve(async (request) => {
       "• buy Milk",
       "• add Sign school form tomorrow",
       "• done Milk",
+      "• create a Costco list",
+      "• add Paper towels to Costco",
+      "• show my Costco list",
+      "• clear my Costco list",
       "You can add up to five tasks or events in one message.",
       "You can also say: “Add football Friday at 17:00” or “Assign the school form to Maria.”",
     ].join("\n");
@@ -993,12 +1143,20 @@ Deno.serve(async (request) => {
   } else if (normalized === "list") {
     reply = await taskList(identity, "open", null);
   } else if (normalized === "shopping list") {
-    reply = await taskList(identity, "open", "things_to_buy");
+    reply = await taskList(identity, "open", "Things to buy");
   } else if (normalized === "my tasks") {
     reply = await taskList(identity, "mine", null);
-  } else if (/^buy\s+/i.test(body) && !likelyCompoundRequest(body)) {
+  } else if (
+    /^buy\s+/i.test(body) &&
+    !likelyCompoundRequest(body) &&
+    !likelyNamedListRequest(body)
+  ) {
     reply = await addTask(identity, body.replace(/^buy\s+/i, ""), "shopping");
-  } else if (/^add\s+/i.test(body) && !likelyCompoundRequest(body)) {
+  } else if (
+    /^add\s+/i.test(body) &&
+    !likelyCompoundRequest(body) &&
+    !likelyNamedListRequest(body)
+  ) {
     const taskText = body.replace(/^add\s+/i, "");
     const isShoppingItem = /^buy\s+/i.test(taskText);
     reply = await addTask(identity, taskText, isShoppingItem ? "shopping" : "tasks");

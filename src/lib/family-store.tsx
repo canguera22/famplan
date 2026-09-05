@@ -13,6 +13,7 @@ import type {
   FamilyPerson,
   FamilyTask,
   NewEventInput,
+  NewListInput,
   NewTaskInput,
   TaskStatus,
 } from "@/domain/family";
@@ -34,6 +35,7 @@ interface FamilyPlannerState {
 
 interface FamilyPlannerValue extends FamilyPlannerState {
   hydrated: boolean;
+  addList: (input: NewListInput) => string;
   addTask: (input: NewTaskInput) => string;
   updateTask: (taskId: string, patch: Partial<FamilyTask>) => void;
   moveTask: (taskId: string, status: TaskStatus, assigneeId?: string | null) => void;
@@ -199,6 +201,42 @@ export function FamilyPlannerProvider({ children }: { children: ReactNode }) {
     () => ({
       ...state,
       hydrated,
+      addList: (input) => {
+        if (!family || !user) throw new Error("Your family workspace is not ready.");
+        const name = input.name.trim();
+        if (!name) throw new Error("A list name is required.");
+        const id = crypto.randomUUID();
+        const list: FamilyList = {
+          id,
+          name,
+          description: input.description?.trim() ?? "",
+          color: input.color ?? "green",
+        };
+        const position =
+          state.lists.reduce((highest, item, index) => Math.max(highest, index), -1) + 1;
+        setState((current) => ({ ...current, lists: [...current.lists, list] }));
+        void getSupabaseBrowserClient()
+          .from("lists")
+          .insert({
+            id,
+            family_id: family.id,
+            name: list.name,
+            description: list.description,
+            color: list.color,
+            position,
+            created_by: user.id,
+          })
+          .then(({ error }) => {
+            if (error) {
+              reportSyncError("list insert", error);
+              setState((current) => ({
+                ...current,
+                lists: current.lists.filter((item) => item.id !== id),
+              }));
+            }
+          });
+        return id;
+      },
       addTask: (input) => {
         if (!family || !user) throw new Error("Your family workspace is not ready.");
         const id = crypto.randomUUID();

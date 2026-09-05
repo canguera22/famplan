@@ -53,6 +53,12 @@ export interface NewTaskInput {
   priority?: TaskPriority;
 }
 
+export interface NewListInput {
+  name: string;
+  description?: string;
+  color?: FamilyList["color"];
+}
+
 export interface NewEventInput {
   title: string;
   description?: string;

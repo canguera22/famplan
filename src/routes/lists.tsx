@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, type DragEvent } from "react";
-import { CalendarDays, Check, ChevronDown, Circle, ListTodo, UserRound } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, Circle, ListTodo, Plus, UserRound } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { Button, Field, TextArea, TextInput, Toggle } from "@/components/ui-kit";
 import {
@@ -10,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { FamilyTask } from "@/domain/family";
+import type { FamilyList, FamilyTask } from "@/domain/family";
 import { personFor, useFamilyPlanner } from "@/lib/family-store";
 import { cn } from "@/lib/utils";
 
@@ -35,6 +35,7 @@ function ListsPage() {
   const [listId, setListId] = useState(planner.lists[0]?.id ?? "family_tasks");
   const [mobileLane, setMobileLane] = useState<BoardLane>("active");
   const [editing, setEditing] = useState<FamilyTask | null>(null);
+  const [creatingList, setCreatingList] = useState(false);
   const selected = planner.lists.find((list) => list.id === listId) ?? planner.lists[0]!;
   const tasks = planner.tasks.filter((task) => task.listId === selected.id);
 
@@ -73,9 +74,20 @@ function ListsPage() {
           </div>
           <p className="mt-2 text-sm text-muted-foreground">{selected.description}</p>
         </div>
-        <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-          <CalendarDays className="h-4 w-4 text-primary" /> Dated cards appear on the calendar by
-          default
+        <div className="flex flex-col items-start gap-2 sm:items-end">
+          <Button
+            type="button"
+            variant="secondary"
+            className="min-h-11 gap-2"
+            onClick={() => setCreatingList(true)}
+          >
+            <Plus className="h-4 w-4" />
+            New list
+          </Button>
+          <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+            <CalendarDays className="h-4 w-4 text-primary" /> Dated cards appear on the calendar by
+            default
+          </div>
         </div>
       </div>
 
@@ -134,7 +146,124 @@ function ListsPage() {
       {editing ? (
         <TaskEditor key={editing.id} task={editing} onClose={() => setEditing(null)} />
       ) : null}
+      {creatingList ? (
+        <CreateListDialog
+          onClose={() => setCreatingList(false)}
+          onCreated={(id) => setListId(id)}
+        />
+      ) : null}
     </AppShell>
+  );
+}
+
+function CreateListDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (id: string) => void;
+}) {
+  const planner = useFamilyPlanner();
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [color, setColor] = useState<FamilyList["color"]>("green");
+  const duplicate = planner.lists.some(
+    (list) => list.name.trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase(),
+  );
+
+  const submit = () => {
+    if (!name.trim() || duplicate) return;
+    const id = planner.addList({ name, description, color });
+    onCreated(id);
+    onClose();
+  };
+
+  const colors: Array<{ value: FamilyList["color"]; label: string; dot: string }> = [
+    { value: "green", label: "Green", dot: "bg-primary" },
+    { value: "blue", label: "Blue", dot: "bg-person-blue" },
+    { value: "amber", label: "Amber", dot: "bg-person-amber" },
+  ];
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="max-h-[90dvh] w-[calc(100%-1.5rem)] overflow-y-auto rounded-3xl p-5 sm:max-w-md sm:p-6">
+        <DialogHeader className="pr-8 text-left">
+          <DialogTitle>Create a list</DialogTitle>
+          <DialogDescription>
+            Make a reusable list for groceries, packing, errands, or anything your family shares.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+        >
+          <Field label="List name">
+            <TextInput
+              autoFocus
+              maxLength={60}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              aria-invalid={duplicate}
+              aria-describedby={duplicate ? "list-name-error" : undefined}
+              placeholder="Costco"
+            />
+            {duplicate ? (
+              <p
+                id="list-name-error"
+                role="alert"
+                className="mt-2 text-sm font-medium text-destructive"
+              >
+                A list with this name already exists.
+              </p>
+            ) : null}
+          </Field>
+          <Field label="Description" hint="Optional — helps everyone know what belongs here.">
+            <TextArea
+              rows={2}
+              maxLength={160}
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="Our regular supermarket run"
+            />
+          </Field>
+          <fieldset>
+            <legend className="text-sm font-medium">Color</legend>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              {colors.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={color === option.value}
+                  onClick={() => setColor(option.value)}
+                  className={cn(
+                    "flex min-h-11 items-center justify-center gap-2 rounded-xl border px-3 text-sm font-bold transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20",
+                    color === option.value
+                      ? "border-primary bg-secondary text-foreground"
+                      : "border-border bg-card text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <span
+                    className={cn("h-3 w-3 rounded-full border border-foreground/10", option.dot)}
+                  />
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <Button type="submit" size="lg" disabled={!name.trim() || duplicate}>
+            Create list
+          </Button>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
