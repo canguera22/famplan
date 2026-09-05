@@ -10,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { FamilyTask, TaskStatus } from "@/domain/family";
+import type { FamilyTask } from "@/domain/family";
 import { personFor, useFamilyPlanner } from "@/lib/family-store";
 import { cn } from "@/lib/utils";
 
@@ -19,24 +19,31 @@ export const Route = createFileRoute("/lists")({
   component: ListsPage,
 });
 
-const LANES: Array<{ status: TaskStatus; label: string; helper: string }> = [
-  { status: "open", label: "Open", helper: "Waiting for an owner" },
-  { status: "assigned", label: "Assigned", helper: "Someone is on it" },
+type BoardLane = "active" | "done";
+
+const LANES: Array<{ status: BoardLane; label: string; helper: string }> = [
+  { status: "active", label: "Open", helper: "Everything still to do" },
   { status: "done", label: "Done", helper: "Completed" },
 ];
+
+function taskIsInLane(task: FamilyTask, lane: BoardLane) {
+  return lane === "done" ? task.status === "done" : task.status !== "done";
+}
 
 function ListsPage() {
   const planner = useFamilyPlanner();
   const [listId, setListId] = useState(planner.lists[0]?.id ?? "family_tasks");
-  const [mobileLane, setMobileLane] = useState<TaskStatus>("open");
+  const [mobileLane, setMobileLane] = useState<BoardLane>("active");
   const [editing, setEditing] = useState<FamilyTask | null>(null);
   const selected = planner.lists.find((list) => list.id === listId) ?? planner.lists[0]!;
   const tasks = planner.tasks.filter((task) => task.listId === selected.id);
 
-  const drop = (event: DragEvent, status: TaskStatus) => {
+  const drop = (event: DragEvent, status: BoardLane) => {
     event.preventDefault();
     const taskId = event.dataTransfer.getData("text/mesa-task");
-    if (taskId) planner.moveTask(taskId, status);
+    const task = tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return;
+    planner.moveTask(taskId, status === "done" ? "done" : task.assigneeId ? "assigned" : "open");
   };
 
   return (
@@ -73,12 +80,12 @@ function ListsPage() {
       </div>
 
       <div
-        className="mb-4 grid grid-cols-3 rounded-2xl bg-muted p-1 md:hidden"
+        className="mb-4 grid grid-cols-2 rounded-2xl bg-muted p-1 md:hidden"
         role="tablist"
         aria-label="Task lanes"
       >
         {LANES.map((lane) => {
-          const count = tasks.filter((task) => task.status === lane.status).length;
+          const count = tasks.filter((task) => taskIsInLane(task, lane.status)).length;
           return (
             <button
               key={lane.status}
@@ -100,12 +107,12 @@ function ListsPage() {
         })}
       </div>
 
-      <div className="hidden grid-cols-3 gap-4 md:grid">
+      <div className="hidden grid-cols-2 gap-4 md:grid">
         {LANES.map((lane) => (
           <KanbanLane
             key={lane.status}
             lane={lane}
-            tasks={tasks.filter((task) => task.status === lane.status)}
+            tasks={tasks.filter((task) => taskIsInLane(task, lane.status))}
             onEdit={setEditing}
             onDrop={(event) => drop(event, lane.status)}
           />
@@ -116,7 +123,7 @@ function ListsPage() {
           <KanbanLane
             key={lane.status}
             lane={lane}
-            tasks={tasks.filter((task) => task.status === lane.status)}
+            tasks={tasks.filter((task) => taskIsInLane(task, lane.status))}
             onEdit={setEditing}
             onDrop={(event) => drop(event, lane.status)}
             mobile
@@ -157,11 +164,7 @@ function KanbanLane({
             <span
               className={cn(
                 "h-2.5 w-2.5 rounded-full",
-                lane.status === "open"
-                  ? "bg-accent"
-                  : lane.status === "assigned"
-                    ? "bg-primary"
-                    : "bg-secondary-foreground",
+                lane.status === "active" ? "bg-primary" : "bg-secondary-foreground",
               )}
             />
             {lane.label}
@@ -306,9 +309,7 @@ function TaskEditor({ task, onClose }: { task: FamilyTask; onClose: () => void }
       <DialogContent className="max-h-[90dvh] w-[calc(100%-1.5rem)] overflow-y-auto rounded-3xl p-5 sm:max-w-lg sm:p-6">
         <DialogHeader className="pr-8 text-left">
           <DialogTitle>Edit card</DialogTitle>
-          <DialogDescription>
-            Assign it, give it a date, or move it to another lane.
-          </DialogDescription>
+          <DialogDescription>Assign it, give it a date, or mark it done.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <Field label="Task">
@@ -341,18 +342,12 @@ function TaskEditor({ task, onClose }: { task: FamilyTask; onClose: () => void }
             <Field label="Lane">
               <select
                 className="form-control"
-                value={draft.status}
+                value={draft.status === "done" ? "done" : "active"}
                 onChange={(event) => {
-                  const status = event.target.value as TaskStatus;
+                  const status = event.target.value as BoardLane;
                   setDraft({
                     ...draft,
-                    status,
-                    assigneeId:
-                      status === "assigned" && !draft.assigneeId
-                        ? planner.people[0]!.id
-                        : status === "open"
-                          ? null
-                          : draft.assigneeId,
+                    status: status === "done" ? "done" : draft.assigneeId ? "assigned" : "open",
                   });
                 }}
               >

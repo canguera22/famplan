@@ -56,31 +56,92 @@ function startOfWeek(date: Date): Date {
   return next;
 }
 
+function startOfMonth(date: Date): Date {
+  const next = new Date(date.getFullYear(), date.getMonth(), 1);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function addDays(date: Date, amount: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + amount);
+  return next;
+}
+
+function sameMonth(left: Date, right: Date): boolean {
+  return left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth();
+}
+
+function calendarDayNumber(date: Date): number {
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000;
+}
+
 function dayKey(value: string | Date): string {
   const date = typeof value === "string" ? new Date(value) : value;
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
+function isMultiDayEvent(
+  item: CalendarDisplayItem,
+): item is CalendarDisplayItem & { kind: "event"; endsAt: string } {
+  if (item.kind !== "event" || item.endsAt === null) return false;
+  return eventSpansMultipleDays(item);
+}
+
+interface MonthBar {
+  item: CalendarDisplayItem & { kind: "event"; endsAt: string };
+  startColumn: number;
+  span: number;
+  lane: number;
+}
+
+function barsForWeek(items: CalendarDisplayItem[], weekStart: Date): MonthBar[] {
+  const weekStartNumber = calendarDayNumber(weekStart);
+  const candidates = items
+    .filter(isMultiDayEvent)
+    .map((item) => {
+      const eventStart = new Date(item.at);
+      const eventEnd = eventDisplayEnd(item);
+      const startColumn = Math.max(0, calendarDayNumber(eventStart) - weekStartNumber);
+      const endColumn = Math.min(6, calendarDayNumber(eventEnd) - weekStartNumber);
+      return { item, startColumn, endColumn };
+    })
+    .filter((segment) => segment.endColumn >= 0 && segment.startColumn <= 6)
+    .sort(
+      (left, right) => left.startColumn - right.startColumn || right.endColumn - left.endColumn,
+    );
+  const laneEnds: number[] = [];
+
+  return candidates.map(({ item, startColumn, endColumn }) => {
+    let lane = laneEnds.findIndex((lastColumn) => lastColumn < startColumn);
+    if (lane === -1) lane = laneEnds.length;
+    laneEnds[lane] = endColumn;
+    return { item, startColumn, span: endColumn - startColumn + 1, lane };
+  });
+}
+
 function CalendarPage() {
   const planner = useFamilyPlanner();
   const { user } = useAuth();
-  const [anchor, setAnchor] = useState(() => startOfWeek(new Date()));
+  const [anchor, setAnchor] = useState(() => startOfMonth(new Date()));
+  const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [selectedItem, setSelectedItem] = useState<CalendarDisplayItem | null>(null);
   const currentPerson = planner.people.find((person) => person.userId === user?.id);
-  const days = useMemo(
-    () =>
-      Array.from({ length: 7 }, (_, index) => {
-        const date = new Date(anchor);
-        date.setDate(anchor.getDate() + index);
-        return date;
-      }),
-    [anchor],
+  const days = useMemo(() => {
+    const gridStart = startOfWeek(anchor);
+    return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  }, [anchor]);
+  const weeks = useMemo(
+    () => Array.from({ length: 6 }, (_, index) => days.slice(index * 7, index * 7 + 7)),
+    [days],
+  );
+  const monthLabel = new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(
+    anchor,
   );
   const today = dayKey(new Date());
 
   const items = useMemo<CalendarDisplayItem[]>(() => {
-    const rangeEnd = new Date(days[6]);
-    rangeEnd.setDate(rangeEnd.getDate() + 1);
+    const rangeEnd = addDays(days[41], 1);
     return [
       ...expandCalendarEvents(planner.events, days[0], rangeEnd).map((event) => ({
         id: event.id,
@@ -118,41 +179,50 @@ function CalendarPage() {
       )
       .sort((a, b) => a.at.localeCompare(b.at));
 
-  const shiftWeek = (amount: number) =>
-    setAnchor((current) => {
-      const next = new Date(current);
-      next.setDate(next.getDate() + amount * 7);
-      return next;
-    });
-  const rangeLabel = `${new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(days[0])} – ${new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }).format(days[6])}`;
+  const selectedItems = itemsForDay(selectedDate);
+  const shiftMonth = (amount: number) => {
+    const next = new Date(anchor.getFullYear(), anchor.getMonth() + amount, 1);
+    setAnchor(next);
+    setSelectedDate(next);
+  };
+  const goToToday = () => {
+    const now = new Date();
+    setAnchor(startOfMonth(now));
+    setSelectedDate(now);
+  };
+  const selectedDateLabel = new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  }).format(selectedDate);
 
   return (
     <AppShell
       title="Calendar"
       subtitle="One shared view of appointments, activities and dated tasks."
     >
-      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-lg font-bold">{rangeLabel}</p>
-          <p className="text-xs text-muted-foreground">Europe/Madrid</p>
+          <p className="text-xl font-bold">{monthLabel}</p>
+          <p className="text-xs text-muted-foreground">Select a day to see its plan</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={() => setAnchor(startOfWeek(new Date()))}>
+          <Button variant="secondary" size="sm" onClick={goToToday}>
             Today
           </Button>
           <button
             type="button"
-            onClick={() => shiftWeek(-1)}
+            onClick={() => shiftMonth(-1)}
             className="icon-button"
-            aria-label="Previous week"
+            aria-label="Previous month"
           >
             <ChevronLeft className="h-5 w-5" />
           </button>
           <button
             type="button"
-            onClick={() => shiftWeek(1)}
+            onClick={() => shiftMonth(1)}
             className="icon-button"
-            aria-label="Next week"
+            aria-label="Next month"
           >
             <ChevronRight className="h-5 w-5" />
           </button>
@@ -160,7 +230,7 @@ function CalendarPage() {
       </div>
 
       <div
-        className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2"
+        className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2"
         aria-label="Family color key"
       >
         {planner.people.map((person) => (
@@ -187,101 +257,46 @@ function CalendarPage() {
         </span>
       </div>
 
-      <div className="hidden overflow-hidden rounded-3xl border border-border bg-card md:grid md:grid-cols-7">
-        {days.map((date) => {
-          const dateItems = itemsForDay(date);
-          const isToday = dayKey(date) === today;
-          return (
-            <section
-              key={dayKey(date)}
-              className="min-h-[31rem] border-r border-border last:border-r-0"
-              aria-label={new Intl.DateTimeFormat("en", {
-                weekday: "long",
-                month: "long",
-                day: "numeric",
-              }).format(date)}
-            >
-              <div
-                className={cn(
-                  "border-b border-border px-3 py-4 text-center",
-                  isToday && "bg-person-blue",
-                )}
-              >
-                <p className="text-[0.68rem] font-bold uppercase tracking-[0.12em] text-muted-foreground">
-                  {new Intl.DateTimeFormat("en", { weekday: "short" }).format(date)}
-                </p>
-                <p
-                  className={cn(
-                    "mx-auto mt-1 grid h-9 w-9 place-items-center rounded-full text-lg font-bold",
-                    isToday && "bg-primary text-primary-foreground",
-                  )}
-                >
-                  {date.getDate()}
-                </p>
-              </div>
-              <div className="space-y-2 p-2">
-                {dateItems.map((item) => (
-                  <CalendarItem
-                    key={`${item.kind}_${item.id}_${item.at}`}
-                    item={item}
-                    person={personFor(planner.people, item.assigneeId)}
-                    isMine={item.assigneeId === currentPerson?.id}
-                    onSelect={() => setSelectedItem(item)}
-                    compact
-                  />
-                ))}
-                {!dateItems.length ? (
-                  <p className="px-1 py-3 text-center text-xs text-muted-foreground">Clear</p>
-                ) : null}
-              </div>
-            </section>
-          );
-        })}
-      </div>
+      <MonthCalendar
+        anchor={anchor}
+        weeks={weeks}
+        items={items}
+        selectedDate={selectedDate}
+        todayKey={today}
+        people={planner.people}
+        onSelectDate={setSelectedDate}
+        onSelectItem={setSelectedItem}
+      />
 
-      <div className="space-y-4 md:hidden">
-        {days.map((date) => {
-          const dateItems = itemsForDay(date);
-          const isToday = dayKey(date) === today;
-          return (
-            <section key={dayKey(date)} aria-labelledby={`day-${dayKey(date)}`}>
-              <div className="mb-2 flex items-baseline gap-2">
-                <h2
-                  id={`day-${dayKey(date)}`}
-                  className={cn("font-bold", isToday && "text-primary")}
-                >
-                  {new Intl.DateTimeFormat("en", { weekday: "long" }).format(date)}
-                </h2>
-                <span className="text-sm text-muted-foreground">
-                  {new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(date)}
-                </span>
-                {isToday ? (
-                  <span className="rounded-full bg-person-blue px-2 py-0.5 text-[0.68rem] font-bold text-primary">
-                    Today
-                  </span>
-                ) : null}
-              </div>
-              <Card className="overflow-hidden p-0">
-                {dateItems.length ? (
-                  <div className="divide-y divide-border">
-                    {dateItems.map((item) => (
-                      <CalendarItem
-                        key={`${item.kind}_${item.id}_${item.at}`}
-                        item={item}
-                        person={personFor(planner.people, item.assigneeId)}
-                        isMine={item.assigneeId === currentPerson?.id}
-                        onSelect={() => setSelectedItem(item)}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="px-4 py-5 text-sm text-muted-foreground">Nothing planned.</p>
-                )}
-              </Card>
-            </section>
-          );
-        })}
-      </div>
+      <section className="mt-6" aria-labelledby="selected-day-heading">
+        <div className="mb-3 flex items-baseline justify-between gap-3">
+          <h2 id="selected-day-heading" className="text-lg font-bold">
+            {selectedDateLabel}
+          </h2>
+          <span className="text-xs font-semibold text-muted-foreground">
+            {selectedItems.length} {selectedItems.length === 1 ? "item" : "items"}
+          </span>
+        </div>
+        <Card className="overflow-hidden p-0">
+          {selectedItems.length ? (
+            <div className="divide-y divide-border">
+              {selectedItems.map((item) => (
+                <CalendarItem
+                  key={`${item.kind}_${item.id}_${item.at}`}
+                  item={item}
+                  person={personFor(planner.people, item.assigneeId)}
+                  isMine={item.assigneeId === currentPerson?.id}
+                  onSelect={() => setSelectedItem(item)}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="px-5 py-8 text-center text-sm text-muted-foreground">
+              Nothing planned for this day.
+            </p>
+          )}
+        </Card>
+      </section>
 
       {selectedItem ? (
         <CalendarItemDetail
@@ -292,6 +307,125 @@ function CalendarPage() {
         />
       ) : null}
     </AppShell>
+  );
+}
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function MonthCalendar({
+  anchor,
+  weeks,
+  items,
+  selectedDate,
+  todayKey,
+  people,
+  onSelectDate,
+  onSelectItem,
+}: {
+  anchor: Date;
+  weeks: Date[][];
+  items: CalendarDisplayItem[];
+  selectedDate: Date;
+  todayKey: string;
+  people: FamilyPerson[];
+  onSelectDate: (date: Date) => void;
+  onSelectItem: (item: CalendarDisplayItem) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-border bg-card sm:rounded-3xl">
+      <div className="grid grid-cols-7 border-b border-border bg-muted/65">
+        {WEEKDAYS.map((weekday) => (
+          <div
+            key={weekday}
+            className="py-2 text-center text-[0.65rem] font-bold uppercase tracking-[0.08em] text-muted-foreground sm:py-3 sm:text-xs"
+          >
+            {weekday}
+          </div>
+        ))}
+      </div>
+      {weeks.map((week) => {
+        const bars = barsForWeek(items, week[0]!);
+        return (
+          <div
+            key={dayKey(week[0]!)}
+            className="relative grid grid-cols-7 border-b border-border last:border-b-0"
+          >
+            {week.map((date) => {
+              const dateItems = items.filter((item) =>
+                item.kind === "event"
+                  ? eventOverlapsDay(item, date)
+                  : dayKey(item.at) === dayKey(date),
+              );
+              const selected = dayKey(date) === dayKey(selectedDate);
+              const isToday = dayKey(date) === todayKey;
+              return (
+                <button
+                  key={dayKey(date)}
+                  type="button"
+                  onClick={() => onSelectDate(date)}
+                  aria-pressed={selected}
+                  aria-label={`${new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric" }).format(date)}, ${dateItems.length} planned`}
+                  className={cn(
+                    "flex min-h-[6.75rem] min-w-0 flex-col border-r border-border p-1.5 text-left transition-colors last:border-r-0 hover:bg-muted/60 focus-visible:z-20 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-inset focus-visible:ring-ring/20 sm:min-h-[8rem] sm:p-2",
+                    !sameMonth(date, anchor) && "bg-muted/25 text-muted-foreground",
+                    selected && "bg-person-blue/70",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "grid h-7 w-7 place-items-center rounded-full text-xs font-bold tabular-nums sm:h-8 sm:w-8 sm:text-sm",
+                      isToday && "bg-primary text-primary-foreground",
+                      selected && !isToday && "ring-2 ring-primary text-primary",
+                    )}
+                  >
+                    {date.getDate()}
+                  </span>
+                  <span className="mt-auto flex min-h-2 flex-wrap gap-1" aria-hidden="true">
+                    {dateItems.slice(0, 4).map((item) => (
+                      <span
+                        key={`${item.kind}_${item.id}_${item.at}`}
+                        className={cn(
+                          "h-1.5 w-1.5 rounded-full",
+                          item.kind === "task"
+                            ? "bg-secondary-foreground"
+                            : personTone(personFor(people, item.assigneeId)?.color).dot,
+                        )}
+                      />
+                    ))}
+                  </span>
+                </button>
+              );
+            })}
+            <div
+              className="pointer-events-none absolute inset-x-0 top-9 grid grid-cols-7 gap-y-1 sm:top-11"
+              aria-label="Multi-day events"
+            >
+              {bars.filter((bar) => bar.lane < 3).map((bar) => {
+                const person = personFor(people, bar.item.assigneeId);
+                return (
+                  <button
+                    key={`${bar.item.id}_${bar.item.at}_${bar.startColumn}`}
+                    type="button"
+                    onClick={() => onSelectItem(bar.item)}
+                    className={cn(
+                      "pointer-events-auto mx-0.5 h-4 min-w-0 cursor-pointer truncate rounded px-1 text-left text-[0.55rem] font-bold leading-4 ring-1 ring-inset ring-current/10 transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:h-5 sm:px-2 sm:text-[0.65rem] sm:leading-5",
+                      personTone(person?.color).soft,
+                    )}
+                    style={{
+                      gridColumn: `${bar.startColumn + 1} / span ${bar.span}`,
+                      gridRow: bar.lane + 1,
+                    }}
+                    aria-label={`Open multi-day event ${bar.item.title}`}
+                  >
+                    {bar.item.title}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
